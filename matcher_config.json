@@ -1,0 +1,12 @@
+{
+    "hierarchy": {
+        "level1_col": 1,
+        "level2_col": 2,
+        "level3_col": 3,
+        "sheet_name": 2
+    },
+    "process": {
+        "column": 6,
+        "sheet_name": 2
+    }
+}
