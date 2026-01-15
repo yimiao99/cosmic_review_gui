@@ -296,13 +296,34 @@ class DocumentProcessor:
             for r_idx, row in enumerate(ws.iter_rows(min_row=header_end + 1), header_end + 1):
                 # 检查是否触底 (图 3 中的注记文字)
                 row_note_found = False
+                instructional_row = False
+                
+                # 预提取前几个单元格的字符串，用于检测说明文字
+                row_head_texts = []
                 for i in range(min(5, len(row))):
-                    v = str(row[i].value or "").strip()
-                    if v.startswith("注：") or v.startswith("注:") or "请在正式提交时删除" in v:
+                    val = str(row[i].value or "").strip()
+                    row_head_texts.append(val)
+                    
+                    if val.startswith("注：") or val.startswith("注:") or "请在正式提交时删除" in val:
                         row_note_found = True
                         break
+                    
+                    # 检查是否是模板说明文字 (Instructional Text)
+                    # 这里的逻辑与 HierarchicalMatcher._is_instructional_text 保持一致
+                    if val:
+                        clean_v = re.sub(r"\s+", "", val)
+                        for pattern in HierarchicalMatcher.IGNORE_PATTERNS:
+                            if re.search(pattern.replace(" ", ""), clean_v):
+                                instructional_row = True
+                                break
+                    if instructional_row: break
+
                 if row_note_found:
                     break
+                
+                # 如果是说明提示行，跳过本行不计数
+                if instructional_row:
+                    continue
                 
                 # 检查整行是否为空 (探测前15列)
                 row_has_data = False

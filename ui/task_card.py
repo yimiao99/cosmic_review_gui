@@ -383,6 +383,14 @@ class TaskCard(QFrame):
             self.time_label.setText("⏱️ 校验已完成")
             self.stop_btn.setEnabled(False)
             self.stop_btn.setText("已完成")
+            
+            # 处理已有结果显示送审功能点
+            results = self.task_data["validation_results"][0]
+            ratio_res = results.get("ratio_check", {})
+            if ratio_res and not ratio_res.get("skipped"):
+                fp_count = ratio_res.get("fp_count")
+                if fp_count is not None:
+                    self.meta_label.setText(f"送审人天: {self.task_data['days']}   送审功能点：{fp_count}")
 
     def _create_header(self):
         header = QWidget()
@@ -424,10 +432,10 @@ class TaskCard(QFrame):
         title_row.addStretch()
         left_layout.addLayout(title_row)
 
-        meta = QLabel(f"送审人天: {self.task_data['days']} ")
-        meta.setProperty("class", "task-meta")
-        meta.setStyleSheet("font-size: 13px; font-family: 'Microsoft YaHei UI';")
-        left_layout.addWidget(meta)
+        self.meta_label = QLabel(f"送审人天: {self.task_data['days']} ")
+        self.meta_label.setProperty("class", "task-meta")
+        self.meta_label.setStyleSheet("font-size: 13px; font-family: 'Microsoft YaHei UI';")
+        left_layout.addWidget(self.meta_label)
 
         header_layout.addWidget(left_info, stretch=1)
 
@@ -625,7 +633,7 @@ class TaskCard(QFrame):
                     upper_limit = "2.0" if mandays <= 1000 else "1.5"
                     
                     if ratio_res.get("is_ok"):
-                        log = f"✅送审比例正常，当前送审比例为【{ratio_res.get('ratio', 0)}】"
+                        log = f"✅送审比例正常，当前送审比例为【{ratio_res.get('ratio', 0)}】,送审功能点：{ratio_res['fp_count']}，送审人天：{ratio_res['mandays']}"
                     else:
                         ratio_val = ratio_res.get('ratio', 0)
                         desc = "过多" if ratio_val >= float(upper_limit) else "过少"
@@ -633,6 +641,12 @@ class TaskCard(QFrame):
                     
                     if ratio_res.get("is_ok"):
                         log += f"\n- 送审比例范围在 0.8 ~ {upper_limit}"
+                
+                # 更新送审功能点显示
+                fp_count = ratio_res.get("fp_count")
+                if fp_count is not None:
+                    self.meta_label.setText(f"送审人天: {self.task_data['days']}   送审功能点：{fp_count}")
+                
                 self.steps_widget.set_step_status(3, status)
                 self.task_data["logs"][3] = log
                 self.update_log(3, log)

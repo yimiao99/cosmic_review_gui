@@ -21,6 +21,11 @@ def create_logo(path):
     
     painter.end()
     pixmap.save(path)
+    
+    # 同时生成 ico 文件用于打包
+    if path.endswith(".png"):
+        ico_path = path.replace(".png", ".ico")
+        pixmap.save(ico_path)
 
 if __name__ == "__main__":
     import sys
