@@ -1,0 +1,456 @@
+"""深色模式主题样式"""
+
+from extend.matcher_config import MatcherConfig
+
+
+def get_dark_theme_stylesheet():
+    config = MatcherConfig.load()
+    t = config.get("theme", {})
+    primary = t.get("primary_color", "#66ccff")
+    font_family = t.get("font_family", "Microsoft YaHei UI")
+    font_size = t.get("font_size", 14)
+
+    bg_main = "#1f2937"
+    bg_header = "#111827"
+    text_color = t.get("text_color_dark", "#f3f4f6")
+    border_color = "#374151"
+    item_bg = "#111827"
+
+    return f"""
+    QWidget {{
+        font-family: '{font_family}';
+    }}
+    QMainWindow, QDialog {{
+        background-color: {bg_main};
+    }}
+    QDialog#ReceiptFileDialog {{
+        background-color: {bg_main};
+    }}
+    QWidget#CentralWidget {{
+        background-color: {bg_main};
+    }}
+    QWidget#HomePage {{
+        background-color: transparent;
+    }}
+    QFrame#HeaderFrame {{
+        background: {bg_header};
+        border-bottom: 1px solid {border_color};
+        border-bottom-left-radius: 15px;
+        border-bottom-right-radius: 15px;
+    }}
+    QLabel {{
+        color: {text_color};
+        font-size: {font_size}px;
+    }}
+    QLabel[class="task-title"] {{
+        color: #f9fafb;
+        font-weight: bold;
+    }}
+    QLabel[class="task-meta"], QLabel#SectionDesc {{
+        color: #9ca3af;
+    }}
+    QScrollArea {{
+        background: transparent;
+        border: none;
+    }}
+    QScrollArea > QWidget > QWidget {{
+        background-color: {bg_main};
+    }}
+    QWidget#ScrollContent {{
+        background: {bg_main};
+    }}
+    QFrame[class="TaskCard"] {{
+        background: transparent;
+        border: 1px solid {border_color};
+    }}
+    QFrame#BizGroup, QFrame#CleanGroup {{
+        background-color: transparent;
+        border: none;
+    }}
+    QFrame#UploadArea {{
+        border: 3px dashed #4b5563;
+        border-radius: 10px;
+        background: transparent;
+    }}
+    QFrame#UploadArea:hover {{
+        border-color: {primary};
+        background: transparent;
+    }}
+    QFrame[class="FileQueueItem"] {{
+        background-color: {item_bg};
+        border: 1px solid {border_color};
+        border-radius: 8px;
+        padding: 12px;
+        margin: 2px 0;
+    }}
+    QFrame[class="FileQueueItem"] QPushButton {{
+        background: {border_color};
+        border: 1px solid #4b5563;
+        color: #9ca3af;
+    }}
+    QFrame[class="FileQueueItem"] QPushButton:hover {{
+        background: #4c0519;
+        color: #fb7185;
+        border-color: #fb7185;
+    }}
+    QFrame[class="FileQueueItem"]:hover {{
+        border-color: {primary};
+        background-color: {bg_main};
+    }}
+    QFrame[class="TaskCard"] QLabel {{
+        color: {text_color};
+    }}
+    QFrame[class="TaskCard"] #LogPanel {{
+        background: transparent;
+        color: #d1d5db;
+        padding: 12px 16px;
+        border-radius: 6px;
+        border: 1px solid {border_color};
+        border-left: 4px solid #059669;
+        font-size: 13px;
+    }}
+    QLabel[class="step-label"] {{
+        font-size: 14px;
+
+        color: #d1d5db;
+        padding: 4px 2px;
+        border-radius: 4px;
+        background: transparent;
+    }}
+    QLabel[class="step-label"][status="processing"] {{ color: #60a5fa; font-weight: bold; }}
+    QLabel[class="step-label"][status="done"] {{ color: #34d399; font-weight: bold; }}
+    QLabel[class="step-label"][status="finished"] {{ color: #93c5fd; font-weight: bold; }}
+    QLabel[class="step-label"][status="error"] {{ color: #fb7185; font-weight: bold; }}
+
+    /* ReReviewTaskCard 样式 - 深色模式 */
+    QFrame#ReReviewTaskCard {{
+        background-color: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 12px;
+        padding: 16px;
+    }}
+    QFrame#ReReviewTaskCard QLabel#ProjectTitle {{
+        color: #f1f5f9;
+        font-size: 18px;
+        font-weight: bold;
+    }}
+    QFrame#ReReviewTaskCard QLabel#TimeLabel {{
+        color: #cbd5e1;
+        font-size: 12px;
+    }}
+    QFrame#ReReviewTaskCard QLabel#StatusLabel {{
+        color: #cbd5e1;
+        font-size: 13px;
+    }}
+    QFrame#ReReviewTaskCard QPushButton.FileBtn {{
+        background-color: #1e293b;
+        color: #f1f5f9;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        padding: 8px 16px;
+        font-size: 13px;
+        font-weight: 500;
+    }}
+    QFrame#ReReviewTaskCard QPushButton.FileBtn:hover {{
+        background-color: #334155;
+        border: 1px solid #60a5fa;
+    }}
+
+    QTableWidget {{
+        background-color: {border_color};
+        gridline-color: #4b5563;
+        border: 1px solid #4b5563;
+        color: {text_color};
+    }}
+    QTableWidget::item {{
+        color: {text_color};
+    }}
+    QHeaderView::section {{
+        background-color: #4b5563;
+        color: #f9fafb;
+        padding: 4px;
+        border: 1px solid {border_color};
+    }}
+    QGroupBox {{
+        font-weight: bold;
+        color: #38bdf8;
+        border: 2px solid #38bdf8;
+        border-radius: 10px;
+        margin-top: 12px;
+        padding-top: 10px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        subcontrol-position: top left;
+        left: 15px;
+        top: 2px;
+        padding: 0 5px;
+        background-color: {bg_main};
+    }}
+    QLineEdit, QComboBox, QDateEdit, QSpinBox {{
+        border: 1px solid #4b5563;
+        border-radius: 6px;
+        padding: 5px;
+        background: {item_bg};
+        color: {text_color};
+        selection-background-color: {primary};
+        selection-color: white;
+    }}
+    QDateEdit QLineEdit {{
+        background: transparent;
+        color: inherit;
+        border: none;
+        padding: 0;
+    }}
+    QPushButton {{
+        border-radius: 6px;
+        padding: 8px 16px;
+        color: {text_color};
+        background: {border_color};
+        border: 1px solid #4b5563;
+    }}
+    QPushButton#UploadBtn {{
+        background: {primary};
+        color: white;
+        font-weight: bold;
+    }}
+    QPushButton#UploadBtn:hover {{
+        background: {primary};
+        filter: brightness(1.2);
+    }}
+    QPushButton#NewTaskBtn {{
+        background-color: #1f2937;
+        color: #f1f5f9;
+        border-radius: 6px;
+        font-weight: bold;
+        border: 1px solid #374151;
+    }}
+    QPushButton#NewTaskBtn:hover {{
+        background-color: #374151;
+        border: 1px solid #60a5fa;
+    }}
+    QPushButton#ReceiptBtn {{
+        background-color: #1f2937;
+        color: #f1f5f9;
+        border-radius: 6px;
+        font-weight: bold;
+        border: 1px solid #374151;
+    }}
+    QPushButton#ReceiptBtn:hover {{
+        background-color: #374151;
+        border: 1px solid #60a5fa;
+    }}
+    QTextBrowser {{
+        background-color: {item_bg};
+        color: {text_color};
+        border: 1px solid {border_color};
+    }}
+    QPushButton#ThemeBtn {{
+        background: {border_color};
+        color: #d1d5db;
+        border: 1px solid #4b5563;
+    }}
+    QPushButton#ThemeBtn:hover {{
+        background: #4b5563;
+    }}
+    QScrollArea, QScrollArea QWidget {{
+        background-color: {bg_main};
+    }}
+    QScrollArea {{
+        border: none;
+    }}
+
+    QCheckBox, QRadioButton {{
+        spacing: 12px;
+        color: {text_color};
+    }}
+    QCheckBox::indicator, QRadioButton::indicator {{
+        width: 22px;
+        height: 22px;
+        border: 2px solid #4b5563;
+        border-radius: 6px;
+        background: #000000;
+    }}
+    QCheckBox::indicator:hover {{
+        border-color: {primary};
+    }}
+    QCheckBox::indicator:checked {{
+        background: {primary};
+        border-color: {primary};
+        image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjQiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBvbHlsaW5lIHBvaW50cz0iMjAgNiA5IDE3IDQgMTIiPjwvcG9seWxpbmU+PC9zdmc+);
+    }}
+    QRadioButton::indicator:checked {{
+        background: #66ccff;
+        border-color: #66ccff;
+        image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSI1IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==);
+    }}
+    QComboBox::drop-down, QDateEdit::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: center right;
+        width: 24px;
+        border-left: none;
+    }}
+    QComboBox::down-arrow, QDateEdit::down-arrow {{
+        image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM5Y2EzYWYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cG9seWxpbmUgcG9pbnRzPSI2IDkgMTIgMTUgMTggOSI+PC9wb2x5bGluZT48L3N2Zz4=);
+        width: 14px;
+        height: 14px;
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {bg_main};
+        color: {text_color};
+        border: 1px solid #4b5563;
+        selection-background-color: {border_color};
+        outline: none;
+    }}
+    /* 日历窗口适配 */
+    QCalendarWidget QWidget {{
+        background-color: {bg_main};
+        color: {text_color};
+    }}
+    QCalendarWidget QAbstractItemView:enabled {{
+        background-color: {bg_main};
+        color: {text_color};
+        selection-background-color: {primary};
+        selection-color: white;
+    }}
+    QCalendarWidget QAbstractItemView:disabled {{
+        color: #4b5563;
+    }}
+    QCalendarWidget QMenu {{
+        background-color: {bg_header};
+        color: {text_color};
+    }}
+    QCalendarWidget QSpinBox {{
+        background-color: {bg_header};
+        color: {text_color};
+        border: none;
+    }}
+    QCalendarWidget QToolButton {{
+        background-color: transparent;
+        color: {text_color};
+    }}
+    QFrame#Sidebar {{
+        background-color: #111827 !important;
+        border-right: 1px solid #374151;
+    }}
+    QFrame#Sidebar > QWidget {{
+        background-color: #111827 !important;
+    }}
+    QPushButton#SidebarToggleBtn {{
+        background: transparent;
+        border: none;
+        font-size: 20px;
+        font-weight: bold;
+        color: #9ca3af;
+        border-radius: 5px;
+    }}
+    QPushButton#SidebarToggleBtn:hover {{
+        background: #374151;
+    }}
+    QPushButton#SidebarThemeBtn {{
+        background: transparent;
+        border: none;
+        font-size: 22px;
+        color: #9ca3af;
+        border-radius: 5px;
+        padding: 0px;
+    }}
+    QPushButton#SidebarThemeBtn:hover {{
+        background: #374151;
+    }}
+    QFrame#SidebarItem {{
+        background: transparent;
+        border-radius: 8px;
+        margin: 0 10px;
+    }}
+    QFrame#SidebarItem:hover {{
+        background: #1e293b;
+    }}
+    QFrame#SidebarItem[selected="true"] {{
+        background: #66ccff;
+        border-radius: 8px;
+    }}
+    /* 侧边栏文字 - 未选中状态 */
+    QFrame#SidebarItem QLabel#SidebarItemText {{
+        color: #f3f4f6 !important;
+        font-size: 14px;
+        font-weight: bold;
+    }}
+    QFrame#SidebarItem QLabel#SidebarItemIcon {{
+        color: #f3f4f6 !important;
+        font-size: 18px;
+    }}
+    /* 侧边栏文字 - 选中状态 */
+    QFrame#SidebarItem[selected="true"] QLabel#SidebarItemText {{
+        color: #ffffff !important;
+        font-weight: bold;
+    }}
+    QFrame#SidebarItem[selected="true"] QLabel#SidebarItemIcon {{
+        color: #ffffff !important;
+    }}
+
+    /* 主题选择按钮 (设置页面) */
+    QPushButton#ThemeLightBtn, QPushButton#ThemeDarkBtn {{
+        border: none;
+        border-radius: 8px;
+        background: #111827;
+        color: #9ca3af;
+        padding: 5px;
+    }}
+    QPushButton#ThemeLightBtn:checked, QPushButton#ThemeDarkBtn:checked {{
+        background: rgba(102, 204, 255, 0.2);
+        color: #66ccff;
+        font-weight: bold;
+        border: 1px solid #66ccff;
+    }}
+    QPushButton#ThemeLightBtn:hover:!checked, QPushButton#ThemeDarkBtn:hover:!checked {{
+        background: #374151;
+        color: #f3f4f6;
+    }}
+
+    QFrame[class="SettingsSection"] {{
+        background: transparent;
+        border: none;
+    }}
+    QWidget#HomePage {{
+        background-color: {bg_main};
+    }}
+    QWidget#HomePage QFrame {{
+        background-color: {bg_header};
+        border: 1px solid {border_color};
+    }}
+    QWidget#HomePage QLabel {{
+        border: none;
+        background: transparent;
+    }}
+    QPushButton#PrimaryBtn {{
+        background: {primary};
+        color: white;
+        border-radius: 6px;
+        font-weight: bold;
+    }}
+    QPushButton#PrimaryBtn:hover {{
+        filter: brightness(1.2);
+    }}
+
+    /* 复选框增强 (深色) */
+    QCheckBox {{
+        spacing: 12px;
+        color: {text_color};
+    }}
+    QCheckBox::indicator {{
+        width: 22px;
+        height: 22px;
+        border: 2px solid #4b5563;
+        border-radius: 6px;
+        background: #000000;
+    }}
+    QCheckBox::indicator:hover {{
+        border-color: #66ccff;
+    }}
+    QCheckBox::indicator:checked {{
+        background: #66ccff;
+        border-color: #66ccff;
+        image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjQiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBvbHlsaW5lIHBvaW50cz0iMjAgNiA5IDE3IDQgMTIiPjwvcG9seWxpbmU+PC9zdmc+);
+    }}
+"""

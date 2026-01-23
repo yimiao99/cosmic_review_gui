@@ -87,3 +87,42 @@ def clean_project_name(filename):
             break
 
     return name.strip()
+
+
+def clear_directory(directory_path):
+    """
+    彻底清空文件夹下的所有文件和子文件夹
+    """
+    if not os.path.exists(directory_path):
+        return True, "文件夹不存在"
+
+    import shutil
+
+    try:
+        for filename in os.listdir(directory_path):
+            file_path = os.path.join(directory_path, filename)
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+        return True, "清理成功"
+    except Exception as e:
+        return False, f"清理失败: {str(e)}"
+
+
+def open_directory(path):
+    """
+    在操作系统中打开文件夹
+    """
+    if not os.path.exists(path):
+        return
+
+    import platform
+    import subprocess
+
+    if platform.system() == "Windows":
+        os.startfile(path)
+    elif platform.system() == "Darwin":  # macOS
+        subprocess.Popen(["open", path])
+    else:  # Linux
+        subprocess.Popen(["xdg-open", path])

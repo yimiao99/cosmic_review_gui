@@ -1,3 +1,4 @@
+import os
 import random
 from datetime import datetime
 
@@ -11,14 +12,22 @@ from PySide6.QtWidgets import (
     QFrame,
     QScrollArea,
     QApplication,
+    QStackedWidget,
+    QMessageBox,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPalette
 from .task_card import TaskCard
 from .upload_dialog import UploadDialog  # ✅ 使用相对导入
-from utils.path_utils import get_resource_path
-from utils.themes import LIGHT_THEME, DARK_THEME
-from utils.styles import apply_dark_title_bar
+from .re_review_dialog import ReReviewUploadDialog  # ✅ 新增重评对话框
+from .re_review_card import ReReviewTaskCard  # ✅ 新增重评卡片
+from .receipt_dialog import ReceiptFileDialog
+from .sidebar import Sidebar  # ✅ 导入侧边栏
+from .settings_widget import SettingsWidget  # ✅ 导入设置组件
+from extend.matcher_config import MatcherConfig  # ✅ 导入配置类
+from utils.path_utils import get_resource_path, open_directory, clear_directory
+from utils.re_review_processor import ReReviewWorker  # ✅ 导入 Worker
+from utils.themes import get_theme_stylesheet, apply_dark_title_bar
 
 
 class CosmicMainWindow(QMainWindow):
@@ -29,11 +38,9 @@ class CosmicMainWindow(QMainWindow):
         self.setWindowTitle("Cosmic 智能审核队列")
         self.setMinimumSize(1200, 800)
 
-        # 记录当前主题状态 (自适应系统默认)
-        palette = QApplication.palette()
-        window_color = palette.color(QPalette.Window)
-        # 如果背景色亮度较低，则判定为深色模式
-        self.is_dark_mode = window_color.lightness() < 128
+        # 🚀 优先从配置加载主题状态，否则自适应系统
+        config = MatcherConfig.load()
+        self.is_dark_mode = config.get("theme", {}).get("is_dark", False)
 
         # 设置窗口图标
         # 如果你有 logo.png 请放在 ui 目录下，这里先写逻辑
@@ -43,16 +50,272 @@ class CosmicMainWindow(QMainWindow):
         self.central_widget = QWidget()
         self.central_widget.setObjectName("CentralWidget")
         self.setCentralWidget(self.central_widget)
-        layout = QVBoxLayout(self.central_widget)
-        layout.setContentsMargins(0, 0, 0, 20)  # 顶部、左右铺满
-        layout.setSpacing(20)
 
-        # Header
+        # 全局水平布局 (左侧边栏 + 右侧主内容)
+        self.main_layout = QHBoxLayout(self.central_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        # 1. 侧边栏
+        self.sidebar = Sidebar()
+        self.sidebar.nav_changed.connect(self.switch_page)
+        self.sidebar.theme_toggled.connect(self.toggle_theme)
+        self.main_layout.addWidget(self.sidebar)
+
+        # 2. 右侧垂直容器
+        self.right_container = QWidget()
+        self.right_layout = QVBoxLayout(self.right_container)
+        self.right_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_layout.setSpacing(0)
+        self.main_layout.addWidget(self.right_container)
+
+        # 3. 栈容器 (存放不同页面)
+        self.stacked_widget = QStackedWidget()
+        self.right_layout.addWidget(self.stacked_widget)
+
+        # 创建页面
+        self.page_home = self._create_home_page()
+        self.page_initial_review = self._create_initial_review_page()
+        self.page_receipt = self._create_receipt_page()
+        self.page_re_review = self._create_re_review_page()  # ✅ 使用正式的重评页面
+        self.page_settings = SettingsWidget()  # ✅ 使用正式的设置页面
+
+        self.stacked_widget.addWidget(self.page_home)
+        self.stacked_widget.addWidget(self.page_initial_review)
+        self.stacked_widget.addWidget(self.page_receipt)
+        self.stacked_widget.addWidget(self.page_re_review)
+        self.stacked_widget.addWidget(self.page_settings)
+
+        # 监听设置更新
+        self.page_settings.config_updated.connect(self._apply_theme)
+
+        # 默认显示主页
+        self.stacked_widget.setCurrentIndex(0)
+        self.sidebar.items[0].setSelected(True)
+
+        # 应用初始主题
+        self._apply_theme()
+
+    def switch_page(self, index):
+        self.stacked_widget.setCurrentIndex(index)
+
+    def _create_home_page(self):
+        page = QWidget()
+        page.setObjectName("HomePage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(30)
+
+        # 欢迎语
+        welcome_label = QLabel("🚀 欢迎使用 Cosmic 智能审核系统")
+        welcome_label.setObjectName("WelcomeLabel")
+        welcome_label.setStyleSheet("font-size: 28px; font-weight: bold;")
+        layout.addWidget(welcome_label)
+
+        # 快捷入口区域
+        grid_layout = QHBoxLayout()
+        grid_layout.setSpacing(20)
+
+        # 存放快捷按钮以便更新主题
+        self.shortcut_btns = []
+
+        # 1. 业务操作卡片
+        biz_group = QFrame()
+        biz_group.setObjectName("BizGroup")
+        biz_group.setStyleSheet("background-color: transparent; border: none;")
+        biz_layout = QVBoxLayout(biz_group)
+        biz_layout.setContentsMargins(25, 25, 25, 25)
+        biz_layout.setSpacing(15)
+
+        biz_title = QLabel("🚀 业务操作")
+        biz_title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        biz_layout.addWidget(biz_title)
+
+        upload_btn = self._create_shortcut_btn(
+            "新增审核任务", "#2563eb", self.show_upload_dialog
+        )
+        receipt_btn = self._create_shortcut_btn(
+            "新增评估确认单", "#10b981", self.show_receipt_dialog
+        )
+        re_review_btn = self._create_shortcut_btn(
+            "新增重评任务", "#f59e0b", self.show_re_review_dialog
+        )
+
+        biz_layout.addWidget(upload_btn)
+        biz_layout.addWidget(receipt_btn)
+        biz_layout.addWidget(re_review_btn)
+        biz_layout.addStretch()
+
+        # 2. 系统清理卡片
+        clean_group = QFrame()
+        clean_group.setObjectName("CleanGroup")
+        clean_group.setStyleSheet("background-color: transparent; border: none;")
+        clean_layout = QVBoxLayout(clean_group)
+        clean_layout.setContentsMargins(25, 25, 25, 25)
+        clean_layout.setSpacing(15)
+
+        clean_title = QLabel("🧹 系统清理")
+        clean_title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        clean_layout.addWidget(clean_title)
+
+        clean_initial = self._create_shortcut_btn(
+            "清空初评文件", "#64748b", lambda: self.clear_files("initial_review")
+        )
+        clean_logs = self._create_shortcut_btn(
+            "清空日志文件", "#64748b", lambda: self.clear_files("logs")
+        )
+        clean_receipt = self._create_shortcut_btn(
+            "清空回单文件", "#64748b", lambda: self.clear_files("receipt")
+        )
+        clean_re_review = self._create_shortcut_btn(
+            "清空重评文件", "#64748b", lambda: self.clear_files("re_review")
+        )
+
+        all_clear_btn = QPushButton("🔥 一键清空全部文件")
+        all_clear_btn.setFixedHeight(50)
+        all_clear_btn.setCursor(Qt.PointingHandCursor)
+        all_clear_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #ef4444; color: white; border-radius: 10px; font-weight: bold; border: none; font-size: 14px;
+            }
+            QPushButton:hover { background-color: #dc2626; }
+        """
+        )
+        all_clear_btn.clicked.connect(self.clear_all_files)
+
+        clean_layout.addWidget(clean_initial)
+        clean_layout.addWidget(clean_logs)
+        clean_layout.addWidget(clean_receipt)
+        clean_layout.addWidget(clean_re_review)
+        clean_layout.addWidget(all_clear_btn)
+        clean_layout.addStretch()
+
+        grid_layout.addWidget(biz_group, 1)
+        grid_layout.addWidget(clean_group, 1)
+        layout.addLayout(grid_layout)
+        layout.addStretch()
+
+        return page
+
+    def _create_shortcut_btn(self, text, color, slot):
+        btn = QPushButton(text)
+        btn.setFixedHeight(45)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setProperty("class", "ShortcutBtn")
+
+        # 保存原始颜色以供主题切换时使用
+        btn.setProperty("theme_color", color)
+        if not hasattr(self, "shortcut_btns"):
+            self.shortcut_btns = []
+        self.shortcut_btns.append(btn)
+
+        self._refresh_shortcut_btn_style(btn)
+        btn.clicked.connect(slot)
+        return btn
+
+    def _refresh_shortcut_btn_style(self, btn):
+        color = btn.property("theme_color")
+        if self.is_dark_mode:
+            # 深色模式：深色背景，彩色边框和文字
+            btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    color: {color};
+                    border: 1px solid {color};
+                    background-color: #111827;
+                    font-size: 14px;
+                }}
+                QPushButton:hover {{
+                    background-color: {color};
+                    color: white;
+                }}
+            """
+            )
+        else:
+            # 浅色模式：默认使用黑色文字，悬停/点击使用蓝色背景并白色文字
+            btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    color: #000000;
+                    border: 1px solid {color};
+                    background-color: white;
+                    font-size: 14px;
+                }}
+                QPushButton:hover, QPushButton:pressed {{
+                    background-color: #66ccff;
+                    border-color: #66ccff;
+                    color: white;
+                }}
+            """
+            )
+
+    def clear_files(self, storage_key):
+        config = MatcherConfig.load()
+        path = config.get("storage", {}).get(storage_key)
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "警告", f"配置的路径不存在: {path}")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "确认清理",
+            f"确定要清空该目录吗？\n{path}",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            from utils.path_utils import clear_directory
+
+            success, msg = clear_directory(path)
+            if success:
+                QMessageBox.information(self, "完成", "清理完毕")
+            else:
+                QMessageBox.critical(self, "错误", msg)
+
+    def clear_all_files(self):
+        reply = QMessageBox.question(
+            self,
+            "危险操作",
+            "确定要清空初评、日志、回单、重评全部四个目录吗？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        from utils.path_utils import clear_directory
+
+        config = MatcherConfig.load()
+        keys = ["initial_review", "logs", "receipt", "re_review"]
+        results = []
+        for key in keys:
+            path = config.get("storage", {}).get(key)
+            if path and os.path.exists(path):
+                clear_directory(path)
+                results.append(f"{key}: 已清理")
+
+        QMessageBox.information(self, "完成", "\n".join(results))
+
+    def _create_placeholder_page(self, text):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        label = QLabel(text)
+        label.setStyleSheet("font-size: 24px;")
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        return page
+
+    def _create_initial_review_page(self):
+        """创建初评页面 (即原有的主界面内容)"""
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 20)
+        page_layout.setSpacing(20)
+
+        # Header (仍保留在页面内，或作为全局 Header)
         self.header = self._create_header()
-        self.header.setObjectName("HeaderFrame")
-        layout.addWidget(self.header)
+        page_layout.addWidget(self.header)
 
-        # 任务列表 (滚动区域 - 增加左右边距保持内部美观)
+        # 任务列表 (滚动区域)
         scroll_container = QWidget()
         scroll_layout = QVBoxLayout(scroll_container)
         scroll_layout.setContentsMargins(20, 0, 20, 0)
@@ -65,19 +328,57 @@ class CosmicMainWindow(QMainWindow):
         self.task_layout = QVBoxLayout(scroll_content)
         self.task_layout.setSpacing(20)
 
-        # 初始不再加载模拟数据，保持界面清爽
+        # 初始不再加载模拟数据
         self.task_layout.addStretch()
         scroll.setWidget(scroll_content)
         scroll_layout.addWidget(scroll)
-        layout.addWidget(scroll_container)
+        page_layout.addWidget(scroll_container)
 
-        # 应用初始主题
-        self._apply_theme()
+        return page
 
     def _apply_theme(self):
         """应用主题样式"""
-        theme = DARK_THEME if self.is_dark_mode else LIGHT_THEME
+        # 从配置中同步主题状态
+        config = MatcherConfig.load()
+        self.is_dark_mode = config.get("theme", {}).get("is_dark", False)
+
+        theme = get_theme_stylesheet(self.is_dark_mode)
         QApplication.instance().setStyleSheet(theme)
+
+        # 重新 polish 侧边栏项目以应用新的样式
+        for item in self.sidebar.items:
+            item.style().unpolish(item)
+            item.style().polish(item)
+            # 也更新子元素
+            item.icon_label.style().unpolish(item.icon_label)
+            item.icon_label.style().polish(item.icon_label)
+            item.text_label.style().unpolish(item.text_label)
+            item.text_label.style().polish(item.text_label)
+
+        # 刷新主页快捷按钮样式 (因为它们含有内联样式)
+        if hasattr(self, "shortcut_btns"):
+            for btn in self.shortcut_btns:
+                self._refresh_shortcut_btn_style(btn)
+
+        # 刷新初评页面的任务卡片
+        if hasattr(self, "task_layout"):
+            for i in range(self.task_layout.count()):
+                item = self.task_layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), TaskCard):
+                    item.widget().update_style()
+
+        # 刷新所有重评和回单卡片的样式
+        if hasattr(self, "re_review_task_layout"):
+            for i in range(self.re_review_task_layout.count()):
+                item = self.re_review_task_layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), ReReviewTaskCard):
+                    item.widget().update_theme_style()
+
+        if hasattr(self, "receipt_task_layout"):
+            for i in range(self.receipt_task_layout.count()):
+                item = self.receipt_task_layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), ReReviewTaskCard):
+                    item.widget().update_theme_style()
 
         # 应用原生标题栏深色模式
         apply_dark_title_bar(self, self.is_dark_mode)
@@ -85,14 +386,31 @@ class CosmicMainWindow(QMainWindow):
         if self.is_dark_mode:
             if hasattr(self, "theme_btn"):
                 self.theme_btn.setText("☀️ 白天模式")
+            if hasattr(self, "sidebar") and hasattr(self.sidebar, "theme_btn"):
+                self.sidebar.theme_btn.setText("☀️")
         else:
             if hasattr(self, "theme_btn"):
                 self.theme_btn.setText("🌙 深色模式")
+            if hasattr(self, "sidebar") and hasattr(self.sidebar, "theme_btn"):
+                self.sidebar.theme_btn.setText("🌙")
 
     def toggle_theme(self):
         """切换主题"""
         self.is_dark_mode = not self.is_dark_mode
+        # 同步到配置
+        config = MatcherConfig.load()
+        if "theme" not in config:
+            config["theme"] = {}
+        config["theme"]["is_dark"] = self.is_dark_mode
+        MatcherConfig.save(config)
+
         self._apply_theme()
+
+        # 刷新所有重评卡片的样式
+        for i in range(self.re_review_task_layout.count()):
+            item = self.re_review_task_layout.itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), ReReviewTaskCard):
+                item.widget().update_theme_style()
 
     def _create_header(self):
         """创建顶部 Header"""
@@ -137,8 +455,14 @@ class CosmicMainWindow(QMainWindow):
 
     def show_upload_dialog(self):
         dialog = UploadDialog(self)
-        dialog.task_submitted.connect(self.add_new_task)  # 关键连接
+        dialog.task_submitted.connect(self.add_new_task_and_navigate)
         dialog.exec()
+
+    def add_new_task_and_navigate(self, task_info):
+        """添加新任务并跳转到初评页面"""
+        self.add_new_task(task_info)
+        # 自动跳转到初评页面 (index 1)
+        self.sidebar.on_item_clicked(1)
 
     def add_new_task(self, task_info):
         """动态添加新任务卡片，随机取色作为边框"""
@@ -167,7 +491,7 @@ class CosmicMainWindow(QMainWindow):
             # 如果已经有结果（比如重载），则保持原有逻辑
             step1_status = "done"  # 示例简化
 
-        # ✅ 6 个步骤，初始状态大部分为 done (模拟)
+        # ✅ 7 个步骤，初始状态大部分为 done (模拟)
         steps = [
             ("模板校验", "pending"),
             ("空值检查", "pending"),
@@ -175,6 +499,7 @@ class CosmicMainWindow(QMainWindow):
             ("附加值因子", "pending"),
             ("层级匹配", "pending"),
             ("功能过程", "pending"),
+            ("功能过程数据移动类型", "pending"),
         ]
 
         logs = {
@@ -184,6 +509,7 @@ class CosmicMainWindow(QMainWindow):
             4: "等待执行...",
             5: "等待执行...",
             6: "等待执行...",
+            7: "等待执行...",
         }
 
         # 默认日志（显示在卡片底部）
@@ -205,3 +531,204 @@ class CosmicMainWindow(QMainWindow):
         # 创建卡片并插入顶部
         card = TaskCard(task_data)
         self.task_layout.insertWidget(0, card)
+
+    def _create_re_review_page(self):
+        """创建重评页面"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header
+        header = QFrame()
+        header.setObjectName("HeaderFrame")
+        header.setFixedHeight(80)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(30, 0, 30, 0)
+
+        title = QLabel("🔄 重评页面")
+        title.setStyleSheet("font-size: 24px; font-weight: bold;")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+
+        self.re_review_btn = QPushButton("新建重评任务")
+        self.re_review_btn.setObjectName("NewTaskBtn")
+        self.re_review_btn.setFixedSize(140, 40)
+
+        self.re_review_btn.clicked.connect(self.show_re_review_dialog)
+        header_layout.addWidget(self.re_review_btn)
+
+        layout.addWidget(header)
+
+        # Content - Scroll Area for Task Cards
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border: none; background: transparent;")
+
+        scroll_content = QWidget()
+        scroll_content.setObjectName("ReReviewScrollContent")
+        self.re_review_task_layout = QVBoxLayout(scroll_content)
+        self.re_review_task_layout.setContentsMargins(30, 20, 30, 20)
+        self.re_review_task_layout.setSpacing(15)
+        self.re_review_task_layout.addStretch()
+
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll, stretch=1)
+
+        return page
+
+    def show_re_review_dialog(self):
+        """显示重评弹窗"""
+        dialog = ReReviewUploadDialog(self)
+        dialog.task_started.connect(self.add_re_review_task)
+        dialog.exec()
+
+    def add_re_review_task(self, task_info):
+        """启动重评任务并在页面显示进度卡片"""
+        # 1. 自动跳转到重评页面 (Index 3)
+        self.sidebar.on_item_clicked(3)
+
+        # 2. 创建并显示卡片
+        card = ReReviewTaskCard(task_info)
+        self.re_review_task_layout.insertWidget(0, card)
+
+        # 3. 启动后台线程
+        project_name = os.path.basename(task_info["excel1"])
+        worker = ReReviewWorker(
+            task_info["excel1"],
+            task_info["excel2"],
+            task_info["output_dir"],
+            project_name,
+        )
+
+        # 保持引用防止被垃圾回收
+        if not hasattr(self, "re_review_workers"):
+            self.re_review_workers = []
+        self.re_review_workers.append(worker)
+
+        worker.progress.connect(card.update_progress)
+        worker.finished.connect(lambda paths: card.set_completed(paths[0], paths[1]))
+        worker.error.connect(card.set_error)
+        worker.finished.connect(lambda: self.re_review_workers.remove(worker))
+        worker.error.connect(lambda: self.re_review_workers.remove(worker))
+
+        worker.start()
+
+    def _create_receipt_page(self):
+        """创建回单页面"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header
+        header = QFrame()
+        header.setObjectName("HeaderFrame")
+        header.setFixedHeight(80)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(30, 0, 30, 0)
+
+        title = QLabel("📄 回单页面")
+        title.setStyleSheet("font-size: 24px; font-weight: bold;")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+
+        self.receipt_btn = QPushButton("新增确认单")
+        self.receipt_btn.setObjectName("ReceiptBtn")
+        self.receipt_btn.setFixedSize(140, 40)
+        self.receipt_btn.clicked.connect(self.show_receipt_dialog)
+        header_layout.addWidget(self.receipt_btn)
+
+        layout.addWidget(header)
+
+        # Content - Scroll Area for Task Cards
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border: none; background: transparent;")
+
+        scroll_content = QWidget()
+        scroll_content.setObjectName("ReceiptScrollContent")
+        self.receipt_task_layout = QVBoxLayout(scroll_content)
+        self.receipt_task_layout.setContentsMargins(30, 20, 30, 20)
+        self.receipt_task_layout.setSpacing(15)
+        self.receipt_task_layout.addStretch()
+
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll, stretch=1)
+
+        return page
+
+    def show_receipt_dialog(self):
+        """显示回单配置弹窗"""
+        dialog = ReceiptFileDialog(self)
+        dialog.generation_requested.connect(self.handle_receipt_generation)
+        dialog.exec()
+
+    def handle_receipt_generation(self, data):
+        """处理回单生成逻辑"""
+        # 1. 自动跳转到回单页面 (index 2)
+        self.sidebar.on_item_clicked(2)
+
+        # 2. 创建一个任务卡片并插入
+        task_info = {
+            "project_name": data["project_name"],
+            "type": "回单生成",
+            "time": datetime.now().strftime("%H:%M:%S"),
+        }
+        card = ReReviewTaskCard(task_info)
+        # 修改卡片上的按钮文字和状态
+        card.excel1_btn.setText("评估报告(已回写)")
+        card.excel2_btn.setText("评估确认单(Word)")
+
+        self.receipt_task_layout.insertWidget(0, card)
+
+        from utils.receipt_processor import ReceiptWorker
+
+        project_name = os.path.basename(data.get("eval_report_path", "Receipt"))
+        worker = ReceiptWorker(data, project_name)
+
+        if not hasattr(self, "receipt_workers"):
+            self.receipt_workers = []
+        self.receipt_workers.append(worker)
+
+        # 3. 连接信号
+        # finished 信号现在返回字典，包含输出路径和统计数据
+        def on_finished(result):
+            if isinstance(result, dict):
+                word_path = result.get("output_path")
+                stats = result.get("stats", {})
+            else:
+                # 后向兼容：如果直接返回字符串路径
+                word_path = result
+                stats = {}
+
+            card.set_completed(excel1=data["eval_report_path"], excel2=word_path)
+            card.log_label.setText(
+                f"✅ 生成成功！文件已保存至：{os.path.dirname(word_path)}"
+            )
+            # 更新输出目录
+            card.task_info["output_dir"] = os.path.dirname(word_path)
+
+            # 显示统计数据
+            if stats:
+                card.update_stats(stats)
+
+            # 自动化：打开文件夹
+            config = MatcherConfig.load()
+            if config.get("automation", {}).get("auto_open", True):
+                open_directory(os.path.dirname(word_path))
+
+        worker.finished.connect(on_finished)
+
+        def on_error(msg):
+            card.set_error(msg)
+            card.log_label.setText(f"❌ 失败: {msg}")
+            card.log_label.setStyleSheet(
+                "font-size: 12px; color: #ef4444; margin-top: 2px;"
+            )
+
+        worker.error.connect(on_error)
+        worker.finished.connect(lambda: self.receipt_workers.remove(worker))
+        worker.error.connect(lambda: self.receipt_workers.remove(worker))
+
+        worker.start()

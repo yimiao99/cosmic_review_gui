@@ -93,6 +93,45 @@ class SummaryDialog(QDialog):
         close_btn.clicked.connect(self.accept)
 
         btn_layout.addStretch()
+
+        # 添加打开辅助报告的入口 (如果存在)
+        results_list = task_data.get("validation_results", [])
+        if results_list:
+            v_res = results_list[0]
+
+            # 层级匹配报告
+            h_path = v_res.get("hierarchy_res", {}).get("report_path")
+            if h_path and os.path.exists(h_path):
+                h_btn = QPushButton("📁 层级匹配报告")
+                h_btn.setFixedHeight(35)
+                h_btn.setStyleSheet(
+                    "border: 1px solid #3b82f6; color: #3b82f6; border-radius: 6px; padding: 0 10px;"
+                )
+                h_btn.clicked.connect(lambda: os.startfile(h_path))
+                btn_layout.addWidget(h_btn)
+
+            # 功能过程报告
+            p_path = v_res.get("process_res", {}).get("report_path")
+            if p_path and os.path.exists(p_path):
+                p_btn = QPushButton("📁 功能过程报告")
+                p_btn.setFixedHeight(35)
+                p_btn.setStyleSheet(
+                    "border: 1px solid #f59e0b; color: #f59e0b; border-radius: 6px; padding: 0 10px;"
+                )
+                p_btn.clicked.connect(lambda: os.startfile(p_path))
+                btn_layout.addWidget(p_btn)
+
+            # 数据移动类型报告
+            m_path = v_res.get("move_res", {}).get("report_path")
+            if m_path and os.path.exists(m_path):
+                m_btn = QPushButton("📁 数据移动报告")
+                m_btn.setFixedHeight(35)
+                m_btn.setStyleSheet(
+                    "border: 1px solid #10b981; color: #10b981; border-radius: 6px; padding: 0 10px;"
+                )
+                m_btn.clicked.connect(lambda: os.startfile(m_path))
+                btn_layout.addWidget(m_btn)
+
         btn_layout.addWidget(copy_btn)
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
@@ -137,18 +176,34 @@ class SummaryDialog(QDialog):
 
         # 2. 层级匹配 (与节点五对齐，但相同类型的核心异常仅保留一条代表项)
         hierarchy_res = results.get("hierarchy_res", {})
+        # 汇总缺失和不匹配项
         not_found_h = hierarchy_res.get("not_found_in_word", [])
-        if not_found_h:
+        mismatched_h = hierarchy_res.get("hierarchy_mismatched", [])
+        combined_h = not_found_h + mismatched_h
+
+        if combined_h:
             # 按照前缀进行去重
             prefix_seen = set()
-            for item in not_found_h:
+            for item in combined_h:
+                # 优先取“简略描述”，如果层级不匹配则会有两个描述，优先取缺失的
                 d = item.get("简略描述", "")
-                if not d:
+                if not d or d == "-":
+                    # 备选取缺失描述或不匹配描述
+                    d = item.get("缺失简略描述", "")
+                    if not d or d == "-":
+                        d = item.get("层级不匹配简略描述", "")
+
+                if not d or d == "-":
                     continue
-                key = d.split("：")[0] if "：" in d else d
-                if key not in prefix_seen:
-                    points.append(d)
-                    prefix_seen.add(key)
+
+                # Split by \n if multiple descriptions exist (e.g. missing + mismatch)
+                for part in d.split("\n"):
+                    if not part or part == "-":
+                        continue
+                    key = part.split("：")[0] if "：" in part else part
+                    if key not in prefix_seen:
+                        points.append(part)
+                        prefix_seen.add(key)
 
         # 3. 需求变更规模因子 (Step 4 补全，对齐贴图文案)
         factors = results.get("factor_check", {})
@@ -216,6 +271,23 @@ class SummaryDialog(QDialog):
             points.append(
                 f"拆分表功能过程 {names_str}{suffix} 功能过程在需求规格书中未体现，建议功能过程逐个核对，功能过程应与需求规格书逐字匹配并以小标题的形式在需求规格书中体现"
             )
+
+        # 6. 数据移动类型校验 (Node 7)
+        move_res = results.get("move_res", {})
+        if move_res and not move_res.get("is_valid"):
+            items = move_res.get("items", [])
+            failed_items = [i for i in items if i["result"] != "合规"]
+            if failed_items:
+                # 汇总不合规的类型
+                err_samples = []
+                for item in failed_items[:2]:
+                    err_samples.append(f"【{item['process']}】({item['result']})")
+
+                err_str = "、".join(err_samples)
+                suffix = "等" if len(failed_items) > 2 else ""
+                points.append(
+                    f"功能过程数据移动类型校验不合规：{err_str}{suffix}{len(failed_items)}处不合规。标准：一个完整功能过程应以 E 开始，并以 W 或 X 结束。"
+                )
 
         # 渲染列表
         if not points:

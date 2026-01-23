@@ -279,15 +279,16 @@ class UploadAreaWidget(QFrame):
     def dragEnterEvent(self, event: QDragEnterEvent):
         """拖拽进入"""
         if event.mimeData().hasUrls():
+            event.accept()
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent):
         """拖拽放下"""
-        files = [url.toLocalFile() for url in event.mimeData().urls()]
-        self.files_dropped.emit(files)
-
-
-from PySide6.QtCore import Signal
+        if event.mimeData().hasUrls():
+            event.accept()
+            event.acceptProposedAction()
+            files = [url.toLocalFile() for url in event.mimeData().urls()]
+            self.files_dropped.emit(files)
 
 
 class UploadDialog(QDialog):
@@ -508,6 +509,23 @@ class UploadDialog(QDialog):
         s_layout.addWidget(self.simple_checkbox)
         s_layout.addWidget(s_desc)
         match_content.addWidget(s_container)
+
+        # 7. 数据移动类型
+        dm_container = QWidget()
+        dm_container.setStyleSheet("background: transparent;")
+        dm_layout = QVBoxLayout(dm_container)
+        dm_layout.setContentsMargins(0, 0, 0, 0)
+        dm_layout.setSpacing(4)
+
+        self.dm_checkbox = QCheckBox("7. 功能过程数据移动类型（E开头W/X结束）")
+        self.dm_checkbox.setChecked(True)
+        dm_desc = QLabel("核对功能过程子项是否符合以“E”开头，“W”或“X”结束的规则")
+        dm_desc.setProperty("class", "task-meta")
+        dm_desc.setStyleSheet("margin-left: 28px; font-size: 11px;")
+
+        dm_layout.addWidget(self.dm_checkbox)
+        dm_layout.addWidget(dm_desc)
+        match_content.addWidget(dm_container)
 
         layout.addLayout(match_content)
 
@@ -786,68 +804,75 @@ class UploadDialog(QDialog):
 
     def handle_files(self, files):
         """处理上传的文件"""
-        print("=" * 50)
-        print("开始处理文件:")
+        try:
+            print("=" * 50)
+            print("开始处理文件:")
 
-        for file_path in files:
-            filename = os.path.basename(file_path)
-            base_name = os.path.splitext(filename)[0]
-            ext = os.path.splitext(filename)[1].lower()
+            for file_path in files:
+                filename = os.path.basename(file_path)
+                base_name = os.path.splitext(filename)[0]
+                ext = os.path.splitext(filename)[1].lower()
 
-            print(f"\n原始文件名: {filename}")
-            print(f"基础名称: {base_name}")
-            print(f"扩展名: {ext}")
+                print(f"\n原始文件名: {filename}")
+                print(f"基础名称: {base_name}")
+                print(f"扩展名: {ext}")
 
-            # 清理文件名：去掉前后缀
-            cleaned_name = self.clean_filename(base_name)
-            print(f"清理后名称: '{cleaned_name}'")
+                # 清理文件名：去掉前后缀
+                cleaned_name = self.clean_filename(base_name)
+                print(f"清理后名称: '{cleaned_name}'")
 
-            # 强化匹配策略：如果找不到完全一致的 Key，尝试搜寻是否有“高度相似”的 Key（连续 6 个字符相同）
-            target_key = cleaned_name
-            if cleaned_name not in self.file_queue:
-                for existing_key in self.file_queue.keys():
-                    if self._is_fuzzy_match(cleaned_name, existing_key):
-                        target_key = existing_key
-                        print(
-                            f"检测到模糊匹配: '{cleaned_name}' 与现有项目 '{existing_key}' 自动合并"
-                        )
-                        break
+                # 强化匹配策略：如果找不到完全一致的 Key，尝试搜寻是否有“高度相似”的 Key（连续 6 个字符相同）
+                target_key = cleaned_name
+                if cleaned_name not in self.file_queue:
+                    for existing_key in self.file_queue.keys():
+                        if self._is_fuzzy_match(cleaned_name, existing_key):
+                            target_key = existing_key
+                            print(
+                                f"检测到模糊匹配: '{cleaned_name}' 与现有项目 '{existing_key}' 自动合并"
+                            )
+                            break
 
-            if target_key not in self.file_queue:
-                print(f"新建条目: {target_key}")
-                self.file_queue[target_key] = {
-                    "has_word": False,
-                    "has_excel": False,
-                    "original_names": {"word": None, "excel": None},
-                    "file_paths": {"word": None, "excel": None},
-                }
-            else:
-                print(f"匹配到现有条目: {target_key}")
+                if target_key not in self.file_queue:
+                    print(f"新建条目: {target_key}")
+                    self.file_queue[target_key] = {
+                        "has_word": False,
+                        "has_excel": False,
+                        "original_names": {"word": None, "excel": None},
+                        "file_paths": {"word": None, "excel": None},
+                    }
+                else:
+                    print(f"匹配到现有条目: {target_key}")
 
-            # 修改这里：同时支持 .doc 和 .docx
-            if ext == ".doc" or ext == ".docx":
-                print("-> 标记为 Word 文件")
-                self.file_queue[target_key]["has_word"] = True
-                self.file_queue[target_key]["original_names"]["word"] = filename
-                self.file_queue[target_key]["file_paths"]["word"] = file_path
-            elif ext == ".xlsx":
-                print("-> 标记为 Excel 文件")
-                self.file_queue[target_key]["has_excel"] = True
-                self.file_queue[target_key]["original_names"]["excel"] = filename
-                self.file_queue[target_key]["file_paths"]["excel"] = file_path
-                # 解析Excel文件信息
-                self.parse_excel_file(target_key, file_path)
+                # 修改这里：同时支持 .doc 和 .docx
+                if ext == ".doc" or ext == ".docx":
+                    print("-> 标记为 Word 文件")
+                    self.file_queue[target_key]["has_word"] = True
+                    self.file_queue[target_key]["original_names"]["word"] = filename
+                    self.file_queue[target_key]["file_paths"]["word"] = file_path
+                elif ext == ".xlsx":
+                    print("-> 标记为 Excel 文件")
+                    self.file_queue[target_key]["has_excel"] = True
+                    self.file_queue[target_key]["original_names"]["excel"] = filename
+                    self.file_queue[target_key]["file_paths"]["excel"] = file_path
+                    # 解析Excel文件信息
+                    self.parse_excel_file(target_key, file_path)
 
-        print("\n当前文件队列:")
-        for key, value in self.file_queue.items():
-            print(f"  '{key}': Word={value['has_word']}, Excel={value['has_excel']}")
-        print("=" * 50)
+            print("\n当前文件队列:")
+            for key, value in self.file_queue.items():
+                print(f"  '{key}': Word={value['has_word']}, Excel={value['has_excel']}")
+            print("=" * 50)
 
-        # 当有Excel文件被添加时，更新下拉框选项
-        if any(v["has_excel"] for v in self.file_queue.values()):
-            self.update_excel_combos()
+            # 当有Excel文件被添加时，更新下拉框选项
+            if any(v["has_excel"] for v in self.file_queue.values()):
+                self.update_excel_combos()
 
-        self.update_queue_display()
+            self.update_queue_display()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            import traceback
+            error_msg = f"处理文件时发生意外错误:\n{str(e)}\n\n{traceback.format_exc()}"
+            print(error_msg)
+            QMessageBox.critical(self, "错误", error_msg)
 
     def parse_excel_file(self, key, file_path):
         """解析Excel文件，获取工作表名称和列信息"""
@@ -1618,6 +1643,7 @@ class UploadDialog(QDialog):
             "run_factors": self.check_factors.isChecked(),
             "run_hierarchy": self.hierarchy_checkbox.isChecked(),
             "run_simple": self.simple_checkbox.isChecked(),
+            "run_move": self.dm_checkbox.isChecked(),
             "mode": (
                 "both"
                 if (
@@ -1635,6 +1661,6 @@ class UploadDialog(QDialog):
         self.task_submitted.emit(task_info)
 
         # 记录日志，但不弹窗阻碍流程，直接关闭即可
-        print(f"✅ 已添加任务：{display_name}")
+        print(f"[OK] 已添加任务：{display_name}")
 
         self.accept()  # 关闭对话框，返回主界面查看任务进度

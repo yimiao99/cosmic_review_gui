@@ -1,4 +1,11 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QFrame,
+    QApplication,
+)
 from PySide6.QtCore import Signal, Qt, QRectF
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QFont
 
@@ -24,17 +31,17 @@ class StepCircle(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(4, 4, 32, 32)
-        
+
         palette = self.palette()
         border_color = palette.color(self.foregroundRole())
-        border_color.setAlpha(50) # 设置较低透明度作为背景环
-        
+        border_color.setAlpha(50)  # 设置较低透明度作为背景环
+
         painter.setPen(QPen(border_color, 2))
         painter.drawEllipse(rect)
 
         # 待处理颜色
         color = palette.color(self.foregroundRole())
-        color.setAlpha(80)
+        color.setAlpha(120)  # 稍微提高透明度更清晰
         text = str(self.step_num)
 
         if self.status == "done":
@@ -72,7 +79,7 @@ class StepCircle(QWidget):
 
         font = QFont("Microsoft YaHei UI")
         font.setBold(True)
-        font.setPointSize(11)
+        font.setPointSize(10)
         painter.setFont(font)
         painter.setPen(
             Qt.white
@@ -92,12 +99,16 @@ class StepNode(QWidget):
         super().__init__(parent)
         self.step_num = step_num
         self.status = status
-        self.setFixedSize(74, 95)
+        # 弹性宽度，降低高度限制
+        self.setMinimumWidth(90)
+        self.setMaximumWidth(140)
+        self.setMinimumHeight(100)
 
         layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignCenter)
-        layout.setSpacing(6)
-        layout.setContentsMargins(0, 0, 0, 0)
+        # 使用顶部居中对齐
+        layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        layout.setSpacing(6)  # 减少圆圈和文字的间距
+        layout.setContentsMargins(0, 10, 0, 0)
 
         self.circle = StepCircle(step_num)
         self.circle.circle_clicked.connect(self.node_clicked.emit)
@@ -106,11 +117,13 @@ class StepNode(QWidget):
         self.label_widget = QLabel(label)
         self.label_widget.setAlignment(Qt.AlignCenter)
         self.label_widget.setProperty("class", "step-label")
+        # 保持字体大小，优化行高
         self.label_widget.setStyleSheet(
-            "font-family: 'Microsoft YaHei UI';"
+            "font-family: 'Microsoft YaHei UI'; font-size: 11px; font-weight: 500; line-height: 1.2;"
         )
         self.label_widget.setWordWrap(True)
         self.label_widget.setCursor(QCursor(Qt.PointingHandCursor))
+        # 允许标签根据需要扩展高度
         layout.addWidget(self.label_widget)
 
         self.update_status(status)
@@ -149,7 +162,7 @@ class StepNode(QWidget):
             self.label_widget.setProperty("status", "error")
         else:
             self.label_widget.setProperty("status", "pending")
-        
+
         # 强制触发样式更新
         self.label_widget.style().unpolish(self.label_widget)
         self.label_widget.style().polish(self.label_widget)
@@ -173,14 +186,20 @@ class StepsWidget(QWidget):
     def __init__(self, steps_data, parent=None):
         super().__init__(parent)
         self.steps_data = steps_data
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 0, 20, 20)
 
-        container = QWidget()
-        container.setFixedHeight(100)
-        container_layout = QHBoxLayout(container)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)  # 进一步压缩外边距
+
+        self.container = QWidget()
+        # 调整容器高度，确保紧致
+        self.container.setMinimumHeight(120)
+        self.container.setFixedHeight(120)
+
+        self.update_theme_style()
+
+        container_layout = QHBoxLayout(self.container)
         container_layout.setSpacing(0)
-        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setContentsMargins(5, 0, 5, 0)
 
         self.step_nodes = []
         for i, (label, status) in enumerate(steps_data, 1):
@@ -193,12 +212,38 @@ class StepsWidget(QWidget):
             if i < len(steps_data):
                 line = QFrame()
                 line.setFrameShape(QFrame.HLine)
+                # 关键：通过 margin-top 将连接线对齐到圆圈中心 (10px margin + 20px radius - 1px half-height = 29px)
                 line.setStyleSheet(
-                    "background: palette(mid); min-height: 2px; max-height: 2px;"
+                    "background: palette(mid); margin-top: 30px; border: none; min-height: 2px; max-height: 2px;"
                 )
-                line.setFixedHeight(2)
-                container_layout.addWidget(line, stretch=1)
-        layout.addWidget(container)
+                line.setFixedHeight(32)  # 30px top + 2px line
+                container_layout.addWidget(line, stretch=1, alignment=Qt.AlignTop)
+        layout.addWidget(self.container)
+
+    def update_theme_style(self):
+        """刷新主题样式"""
+        from extend.matcher_config import MatcherConfig
+
+        config = MatcherConfig.load()
+        is_dark = config.get("theme", {}).get("is_dark", False)
+
+        # 备用检测
+        if not is_dark:
+            qss = QApplication.instance().styleSheet() or ""
+            is_dark = "background-color: #1f2937" in qss
+
+        # 深色模式去掉底色（透明），浅色模式保持中灰色
+        bg_color = "transparent" if is_dark else "#e5e7eb"
+        self.setStyleSheet(f"background: {bg_color};")
+        if hasattr(self, "container"):
+            self.container.setStyleSheet(f"background: {bg_color};")
+
+        # 刷新所有圆圈和文字的状态颜色
+        if hasattr(self, "step_nodes"):
+            for node in self.step_nodes:
+                node.update()
+                node.label_widget.style().unpolish(node.label_widget)
+                node.label_widget.style().polish(node.label_widget)
 
     def set_step_status(self, step_num, status):
         """更新指定步骤的状态 (1-indexed)"""

@@ -2,6 +2,7 @@ import pandas as pd
 import os
 import re
 from datetime import datetime
+from extend.matcher_config import MatcherConfig
 
 
 class ReportGenerator:
@@ -70,11 +71,18 @@ class ReportGenerator:
         return name if name else "未知项目"
 
     @classmethod
-    def generate_validation_report(cls, task_name, results, output_dir="."):
+    def generate_validation_report(cls, task_name, results, output_dir=None):
         """
         生成全量比对报表
         """
         try:
+            if output_dir is None:
+                config = MatcherConfig.load()
+                output_dir = config.get("storage", {}).get("initial_review", ".")
+
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
             details = results.get("all_details", [])
             if not details:
                 return None

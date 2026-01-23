@@ -17,8 +17,9 @@ from .report_dialog import ReportDialog, SummaryDialog
 from utils.document_processor import DocumentProcessor
 from utils.similarity_checker import SimilarityChecker
 from utils.report_generator import ReportGenerator
-from utils.path_utils import get_resource_path, clean_project_name
+from utils.path_utils import get_resource_path, clean_project_name, open_directory
 from utils.runtime_logger import RuntimeLogger
+from extend.matcher_config import MatcherConfig
 
 
 class ValidationWorker(QThread):
@@ -38,25 +39,32 @@ class ValidationWorker(QThread):
         self._is_running = False
 
     def run(self):
-        RuntimeLogger.clear()
+        # 设置项目名称用于日志
+        project_name = self.task_data.get("filename", "UnknownProject")
+        RuntimeLogger.set_project(project_name)
+
         RuntimeLogger.log(f"开始后台校验任务...")
         try:
             # 模拟初始准备负载
             self.progress.emit(5)
-            
-            if not self._is_running: return
+
+            if not self._is_running:
+                return
 
             raw_info = self.task_data.get("raw_task_info", {})
             file_pairs = raw_info.get("file_pairs", [])
             RuntimeLogger.log(f"获取到文件配对数量: {len(file_pairs)}")
             if not file_pairs:
-                RuntimeLogger.log("⚠️ 错误: file_pairs 列表为空，无法继续。", level="ERROR")
+                RuntimeLogger.log(
+                    "⚠️ 错误: file_pairs 列表为空，无法继续。", level="ERROR"
+                )
                 self.finished.emit({})
                 return
 
             # 1. 提取模板
             self.progress.emit(5)
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             template_path = get_resource_path("folder/附件1XX项目需求说明书V1.0.0.docx")
             RuntimeLogger.log(f"正在检测模板文件: {template_path}")
@@ -70,7 +78,8 @@ class ValidationWorker(QThread):
             else:
                 RuntimeLogger.log(f"❌ 警告: 模板文件不存在！", level="WARN")
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 2. 提取目标文档
             pair = file_pairs[0]
@@ -79,7 +88,8 @@ class ValidationWorker(QThread):
             RuntimeLogger.log(f"目标 Word 提取完成，章节数: {len(target_sections)}")
             self.progress.emit(15)
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 3. 提取 Excel
             RuntimeLogger.log(f"正在解析关联 Excel: {os.path.basename(pair['excel'])}")
@@ -87,7 +97,8 @@ class ValidationWorker(QThread):
             RuntimeLogger.log(f"Excel 工作表和列信息提取完成。")
             self.progress.emit(20)
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 4. 深度校验 (第一步：Word 模板比对)
             run_template = raw_info.get("run_template", True)
@@ -99,12 +110,14 @@ class ValidationWorker(QThread):
             else:
                 RuntimeLogger.log(f"跳过模板校验节点")
                 v_res = {"is_valid": True, "skipped": True}
-            
-            if not self._is_running: return
+
+            if not self._is_running:
+                return
             self.step_result.emit(1, v_res)
             self.progress.emit(25)
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 5. Excel 空值校验 (第二步)
             run_empty = raw_info.get("run_empty", True)
@@ -122,12 +135,14 @@ class ValidationWorker(QThread):
             else:
                 RuntimeLogger.log(f"跳过空值校验节点")
                 v_res["excel_check"] = {"is_ok": True, "skipped": True}
-            
-            if not self._is_running: return
+
+            if not self._is_running:
+                return
             self.step_result.emit(2, {"excel_check": v_res["excel_check"]})
             self.progress.emit(45)
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 6. 功能匹配校验 (辅助数据)
             # 始终提取用于后续计算
@@ -145,7 +160,8 @@ class ValidationWorker(QThread):
             )
             v_res["func_match"] = func_match
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 7. 送审比例校验 (第三步)
             run_ratio = raw_info.get("run_ratio", True)
@@ -157,12 +173,16 @@ class ValidationWorker(QThread):
 
                 mandays_input = self.task_data.get("days", "0")
                 mandays = float(mandays_input)
-                RuntimeLogger.log(f"【输入数据检查】线上送审人天原始值: {mandays_input}, 数字化结果: {mandays}")
-                RuntimeLogger.log(f"【计算要素】送审功能点: {fp_count}, 送审人天: {mandays}")
-                
+                RuntimeLogger.log(
+                    f"【输入数据检查】线上送审人天原始值: {mandays_input}, 数字化结果: {mandays}"
+                )
+                RuntimeLogger.log(
+                    f"【计算要素】送审功能点: {fp_count}, 送审人天: {mandays}"
+                )
+
                 ratio = fp_count / mandays if mandays > 0 else 0
                 RuntimeLogger.log(f"【计算过程】{fp_count} / {mandays} = {ratio}")
-                
+
                 # 判定标准
                 if mandays <= 1000:
                     is_ratio_ok = 0.8 <= ratio <= 2.0
@@ -170,8 +190,10 @@ class ValidationWorker(QThread):
                 else:
                     is_ratio_ok = 0.8 <= ratio <= 1.5
                     ratio_range = "0.8 ~ 1.5"
-                
-                RuntimeLogger.log(f"【判定结果】比例: {round(ratio, 2)}, 合规范围: {ratio_range}, 是否合格: {is_ratio_ok}")
+
+                RuntimeLogger.log(
+                    f"【判定结果】比例: {round(ratio, 2)}, 合规范围: {ratio_range}, 是否合格: {is_ratio_ok}"
+                )
 
                 ratio_res = {
                     "fp_count": fp_count,
@@ -185,32 +207,57 @@ class ValidationWorker(QThread):
                 RuntimeLogger.log(f"跳过送审比例校验节点")
                 v_res["ratio_check"] = {"is_ok": True, "skipped": True}
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
             self.step_result.emit(3, {"ratio_check": v_res["ratio_check"]})
             self.progress.emit(65)
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 8. 附加值调整因子校验 (Node 4: Word 因子提取)
             run_factors = raw_info.get("run_factors", True)
             if run_factors:
                 RuntimeLogger.log(f"正在提取 Word 附加值调整因子...")
-                factors = DocumentProcessor.check_adjustment_factors_in_word(pair["word"])
+                factors = DocumentProcessor.check_adjustment_factors_in_word(
+                    pair["word"]
+                )
                 v_res["factor_check"] = factors
             else:
                 RuntimeLogger.log(f"跳过附加值因子校验节点")
                 v_res["factor_check"] = {"skipped": True}
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
             self.step_result.emit(4, {"factor_check": v_res["factor_check"]})
             self.progress.emit(78)
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 9. 层级匹配校验 (Node 5)
             run_hierarchy = raw_info.get("run_hierarchy", True)
             if run_hierarchy:
                 RuntimeLogger.log(f"正在进行层级匹配校验...")
+
+                # 定义中间进度处理
+                def hierarchy_progress_proxy(p, msg):
+                    if not self._is_running:
+                        return
+                    # 将 matcher 内部的进度 (0-100) 映射到 78-87
+                    mapped_progress = 78 + int(p * 0.09)
+                    self.progress.emit(mapped_progress)
+                    if msg:
+                        # 仅在关键节点(或每隔10个)记录日志，避免日志窗口溢出
+                        if (
+                            "开始" in msg
+                            or "完成" in msg
+                            or "1/" in msg
+                            or "/100" in msg
+                            or "00/" in msg
+                        ):
+                            RuntimeLogger.log(msg)
+
                 h_header_row = raw_info.get("hierarchy_header_row", 0)
                 l1_col = raw_info.get("level1_column_index", 1)
                 l2_col = raw_info.get("level2_column_index", 2)
@@ -228,17 +275,22 @@ class ValidationWorker(QThread):
                     sheet_name=hier_sheet,
                     fuzzy_match=fuzzy,
                     threshold=threshold,
+                    progress_callback=hierarchy_progress_proxy,
                 )
                 v_res["hierarchy_res"] = hierarchy_res
-                RuntimeLogger.log(f"层级匹配完成: {hierarchy_res.get('statistics', {})}")
+                RuntimeLogger.log(
+                    f"层级匹配完成: {hierarchy_res.get('statistics', {})}"
+                )
             else:
                 v_res["hierarchy_res"] = {"is_valid": True, "skipped": True}
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
             self.step_result.emit(5, {"hierarchy_res": v_res["hierarchy_res"]})
             self.progress.emit(88)
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 10. 功能过程校验 (Node 6)
             run_simple = raw_info.get("run_simple", False)
@@ -258,17 +310,49 @@ class ValidationWorker(QThread):
                     threshold=threshold,
                 )
                 v_res["process_res"] = process_res
-                RuntimeLogger.log(f"功能过程校验完成: {process_res.get('statistics', {})}")
+                RuntimeLogger.log(
+                    f"功能过程校验完成: {process_res.get('statistics', {})}"
+                )
             else:
                 v_res["process_res"] = {"is_valid": True, "skipped": True}
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
             self.step_result.emit(6, {"process_res": v_res["process_res"]})
+            self.progress.emit(95)
+
+            if not self._is_running:
+                return
+
+            # 11. 功能过程数据移动类型校验 (Node 7)
+            run_move = raw_info.get("run_move", True)
+            if run_move:
+                RuntimeLogger.log(f"正在进行功能过程数据移动类型校验...")
+                # 默认 func_col=6, move_col=8
+                move_res = DocumentProcessor.validate_data_movement_types(
+                    pair["excel"],
+                    sheet_name=simple_sheet,
+                    header_row=f_header_row,
+                    func_col=f_col,
+                    move_col=f_col + 2,  # 通常是偏移2列
+                )
+                v_res["move_res"] = move_res
+                RuntimeLogger.log(
+                    f"数据移动类型校验完成: {move_res.get('statistics', {})}"
+                )
+            else:
+                RuntimeLogger.log(f"跳过功能过程数据移动类型校验")
+                v_res["move_res"] = {"is_valid": True, "skipped": True}
+
+            if not self._is_running:
+                return
+            self.step_result.emit(7, {"move_res": v_res["move_res"]})
             self.progress.emit(98)
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
-            # 11. 自动生成报表
+            # 12. 自动生成报表
             RuntimeLogger.log(f"正在生成自动评估报告...")
             report_path = ReportGenerator.generate_validation_report(
                 self.task_data["filename"], v_res
@@ -276,7 +360,8 @@ class ValidationWorker(QThread):
             v_res["auto_report_path"] = report_path
             RuntimeLogger.log(f"报表生成成功: {report_path}")
 
-            if not self._is_running: return
+            if not self._is_running:
+                return
 
             # 12. 保存完整运行日志
             log_path = RuntimeLogger.save_to_file(self.task_data["filename"])
@@ -287,20 +372,24 @@ class ValidationWorker(QThread):
             self.finished.emit(v_res)
         except Exception as e:
             import traceback
+
             RuntimeLogger.log(f"❌ 致命错误: {str(e)}", level="ERROR")
             RuntimeLogger.log(traceback.format_exc(), level="DEBUG")
-            
+
             # 即使出错也尝试保存已有日志
             try:
-                log_path = RuntimeLogger.save_to_file(self.task_data.get("filename", "ErrorTask"))
+                log_path = RuntimeLogger.save_to_file(
+                    self.task_data.get("filename", "ErrorTask")
+                )
                 self.task_data["runtime_log_path"] = log_path
-            except: pass
+            except:
+                pass
 
             self.finished.emit(
                 {
                     "is_valid": False,
                     "error": str(e),
-                    "runtime_log_path": getattr(self, "runtime_log_path", None)
+                    "runtime_log_path": getattr(self, "runtime_log_path", None),
                 }
             )
 
@@ -322,25 +411,75 @@ class TaskCard(QFrame):
 
         self.setFrameShape(QFrame.StyledPanel)
         self.setProperty("class", "TaskCard")
-        self.update_style()
         self._init_ui()
+        self.update_style()
 
     def update_style(self):
         """根据主题更新边框颜色等特定样式"""
+        from PySide6.QtWidgets import QApplication
+        from extend.matcher_config import MatcherConfig
+
+        # 从配置中检测主题模式
+        config = MatcherConfig.load()
+        is_dark = config.get("theme", {}).get("is_dark", False)
+
+        # 备用检测：如果配置未设置，从样式表中检查
+        if not is_dark:
+            qss = QApplication.instance().styleSheet() or ""
+            is_dark = "background-color: #1f2937" in qss
+
+        if is_dark:
+            card_bg = "transparent"
+            card_border = "#374151"
+            text_color = "#f3f4f6"
+        else:
+            card_bg = "#e5e7eb"
+            card_border = "#cbd5e1"
+            text_color = "#000000"
+
         self.setStyleSheet(
             f"""
             QFrame[class="TaskCard"] {{
-                border-radius: 10px;
-                border: 1px solid palette(mid);
+                background-color: {card_bg};
+                border: 2px solid {card_border};
+                border-radius: 12px;
                 border-left: 6px solid {self.task_data['border_color']};
+                padding: 20px;
+                margin-bottom: 12px;
             }}
+            QLabel {{ color: {text_color}; }}
         """
         )
+
+        # 同步更新子组件样式
+        if hasattr(self, "steps_widget"):
+            self.steps_widget.update_theme_style()
+
+        # 刷新进度面板背景和边框
+        if hasattr(self, "log_panel"):
+            # 保持透明背景，仅更新左侧边框颜色
+            pass
+
+        # 更新 Badge 样式
+        if hasattr(self, "badge"):
+            if is_dark:
+                badge_style = {
+                    "结算": "background: #022c22; color: #10b981; border: 1px solid #064e3b;",
+                    "预算": "background: #451a03; color: #f59e0b; border: 1px solid #78350f;",
+                }
+            else:
+                badge_style = {
+                    "结算": "background: #ecfdf5; color: #047857; border: 1px solid #6ee7b7;",
+                    "预算": "background: #fffbeb; color: #b45309; border: 1px solid #fcd34d;",
+                }
+            self.badge.setStyleSheet(
+                f"{badge_style.get(self.task_data['type_label'], '')} padding: 4px 10px; border-radius: 4px; font-size: 12px; font-family: 'Microsoft YaHei UI';"
+            )
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)  # 紧凑一点
-        layout.setContentsMargins(25, 15, 25, 15)
+        layout.setContentsMargins(16, 16, 16, 16)  # 与re_review_card统一
 
         # Header
         header = self._create_header()
@@ -350,7 +489,7 @@ class TaskCard(QFrame):
         self.time_label = QLabel("⏱️ 预计完成时间: 计算中... | 实际耗时: 00:00")
         self.time_label.setProperty("class", "task-meta")
         self.time_label.setStyleSheet(
-            "font-size: 11px; margin-left: 2px;"
+            "font-size: 14px; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif; margin-left: 2px;"
         )
         layout.addWidget(self.time_label)
 
@@ -383,14 +522,16 @@ class TaskCard(QFrame):
             self.time_label.setText("⏱️ 校验已完成")
             self.stop_btn.setEnabled(False)
             self.stop_btn.setText("已完成")
-            
+
             # 处理已有结果显示送审功能点
             results = self.task_data["validation_results"][0]
             ratio_res = results.get("ratio_check", {})
             if ratio_res and not ratio_res.get("skipped"):
                 fp_count = ratio_res.get("fp_count")
                 if fp_count is not None:
-                    self.meta_label.setText(f"送审人天: {self.task_data['days']}   送审功能点：{fp_count}")
+                    self.meta_label.setText(
+                        f"送审人天: {self.task_data['days']}   送审功能点：{fp_count}"
+                    )
 
     def _create_header(self):
         header = QWidget()
@@ -407,13 +548,17 @@ class TaskCard(QFrame):
         title = QLabel(f"📄 {display_name}")
         title.setToolTip(self.task_data["filename"])  # 悬停显示完整名称
         title.setProperty("class", "task-title")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; font-family: 'Microsoft YaHei UI';")
+        title.setStyleSheet(
+            "font-size: 20px; font-weight: bold; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+        )
         title_row.addWidget(title)
 
         self.badge = QLabel(self.task_data["type_label"])
         # 检测深色模式
-        is_dark = "background-color: #1f2937" in (QApplication.instance().styleSheet() or "")
-        
+        is_dark = "background-color: #1f2937" in (
+            QApplication.instance().styleSheet() or ""
+        )
+
         if is_dark:
             badge_style = {
                 "结算": "background: #022c22; color: #10b981; border: 1px solid #064e3b;",
@@ -426,7 +571,7 @@ class TaskCard(QFrame):
             }
 
         self.badge.setStyleSheet(
-            f"{badge_style.get(self.task_data['type_label'], 'background: palette(midlight); color: palette(text); bord-er: 1px solid palette(mid);')} padding: 2px 8px; border-radius: 4px; font-size: 11px;"
+            f"{badge_style.get(self.task_data['type_label'], 'background: palette(midlight); color: palette(text); bord-er: 1px solid palette(mid);')} padding: 4px 10px; border-radius: 4px; font-size: 13px; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
         )
         title_row.addWidget(self.badge)
         title_row.addStretch()
@@ -434,7 +579,9 @@ class TaskCard(QFrame):
 
         self.meta_label = QLabel(f"送审人天: {self.task_data['days']} ")
         self.meta_label.setProperty("class", "task-meta")
-        self.meta_label.setStyleSheet("font-size: 13px; font-family: 'Microsoft YaHei UI';")
+        self.meta_label.setStyleSheet(
+            "font-size: 15px; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+        )
         left_layout.addWidget(self.meta_label)
 
         header_layout.addWidget(left_info, stretch=1)
@@ -448,7 +595,7 @@ class TaskCard(QFrame):
         self.report_btn = QPushButton("📋 结果情况")
         self.report_btn.setStyleSheet(
             """
-            QPushButton { border: 1px solid palette(mid); padding: 6px 12px; border-radius: 6px; font-size: 12px; }
+            QPushButton { border: 1px solid palette(mid); padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif; }
             QPushButton:hover { border-color: #3b82f6; color: #3b82f6; background: palette(alternate-base); }
         """
         )
@@ -459,7 +606,7 @@ class TaskCard(QFrame):
         self.stop_btn = QPushButton("🛑 停止")
         self.stop_btn.setStyleSheet(
             """
-            QPushButton { border: 1px solid palette(mid); color: #ef4444; padding: 6px 12px; border-radius: 6px; font-size: 12px; }
+            QPushButton { border: 1px solid palette(mid); color: #ef4444; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif; }
             QPushButton:hover { background: palette(alternate-base); border-color: #ef4444; }
             QPushButton:disabled { color: palette(disabled); border-color: palette(mid); opacity: 0.5; }
         """
@@ -479,10 +626,10 @@ class TaskCard(QFrame):
             self.stop_btn.setText("已停止")
             self.time_label.setText("⏱️ 校验已手动停止")
             self.update_log(self.current_step_num, "🛑 用户手动停止了校验任务。")
-            
+
             # 将当前步骤设为警告状态
             self.steps_widget.set_step_status(self.current_step_num, "warn")
-            
+
             # 停止 UI 计时器
             self.ui_timer.stop()
 
@@ -629,24 +776,26 @@ class TaskCard(QFrame):
                     log = "⚪ 送审比例校验已跳过。"
                 else:
                     status = "done" if ratio_res.get("is_ok") else "fail"
-                    mandays = ratio_res.get('mandays', 0)
+                    mandays = ratio_res.get("mandays", 0)
                     upper_limit = "2.0" if mandays <= 1000 else "1.5"
-                    
+
                     if ratio_res.get("is_ok"):
-                        log = f"✅送审比例正常，当前送审比例为【{ratio_res.get('ratio', 0)}】,送审功能点：{ratio_res['fp_count']}，送审人天：{ratio_res['mandays']}"
+                        log = f"✅送审比例正常，当前送审比例为【{ratio_res.get('ratio', 0)}】,送审功能点'：{ratio_res['fp_count']}，送审人天：{ratio_res['mandays']}"
                     else:
-                        ratio_val = ratio_res.get('ratio', 0)
+                        ratio_val = ratio_res.get("ratio", 0)
                         desc = "过多" if ratio_val >= float(upper_limit) else "过少"
                         log = f"❌送审比例{desc}，当前送审比例为【{ratio_val}】，送审功能点：{ratio_res['fp_count']}，送审人天：{ratio_res['mandays']}"
-                    
+
                     if ratio_res.get("is_ok"):
                         log += f"\n- 送审比例范围在 0.8 ~ {upper_limit}"
-                
+
                 # 更新送审功能点显示
                 fp_count = ratio_res.get("fp_count")
                 if fp_count is not None:
-                    self.meta_label.setText(f"送审人天: {self.task_data['days']}   送审功能点：{fp_count}")
-                
+                    self.meta_label.setText(
+                        f"送审人天: {self.task_data['days']}   送审功能点：{fp_count}"
+                    )
+
                 self.steps_widget.set_step_status(3, status)
                 self.task_data["logs"][3] = log
                 self.update_log(3, log)
@@ -678,8 +827,10 @@ class TaskCard(QFrame):
                         )
 
                     valid_v = []
-                    missing = []
+                    text_missing = []
+                    table_missing = []
                     abnormal = []
+
                     for key in [
                         "distributed",
                         "performance",
@@ -688,41 +839,74 @@ class TaskCard(QFrame):
                     ]:
                         f = factors.get(key, {})
                         val = f.get("value")
-                        source = f.get("source")
+                        text_val = f.get("text_value")
+                        table_val = f.get("table_value")
+                        name = f.get("name")
 
-                        # 判定逻辑 (根据用户最新要求：只有特定否定文字才算-1，其他文字算正常)：
-                        # 1. 明确没找到关键字 -> 缺失 (异常)
-                        # 2. 找到了，值是 "-1" -> 明确的否定文字 (异常)
-                        # 3. 找到了，值是 "空"/"无" -> 缺失 (异常)
-                        # 4. 找到了，值是 "1" 或其他正数 -> 正常
-                        # 5. 找到了，是其他文字描述 -> 属于“有内容”，视作正常
+                        # 1. 检查文字描述是否存在
+                        # 如果 text_value 为 None 或 "缺失"，视为文字部分缺失
+                        if not text_val or text_val == "缺失":
+                            text_missing.append(name)
 
-                        str_val = str(val).strip() if val is not None else ""
+                        # 2. 检查总结表格是否存在
+                        if not table_val or table_val == "缺失":
+                            table_missing.append(name)
 
-                        if not f.get("found_in_text"):
-                            missing.append(f.get("name"))
-                        elif str_val in ["-1", "空", "无"]:
-                            # 只有特定负面词(变成-1)或显式的“空/无”才判定为异常
-                            abnormal.append(f"{f.get('name')}({str_val})")
+                        # 3. 检查数值异常 (核心判定逻辑)
+                        str_val = str(val).strip()
+                        if str_val in ["-1", "空", "无"]:
+                            # 只有明确的负面描述或缺失才计入异常
+                            abnormal.append(f"{name}({str_val})")
                         elif str_val == "1" or (str_val.isdigit() and int(str_val) > 0):
-                            valid_v.append(f"{f.get('name')}: {str_val}")
-                        elif val:
-                            # 只要有任何其他非否定描述，都算正常
-                            valid_v.append(f"{f.get('name')}: 有详细描述")
+                            valid_v.append(f"{name}: {str_val}")
+                        elif val and val != "缺失":
+                            valid_v.append(f"{name}: 有描述/勾选")
                         else:
-                            # 找到了关键字但没提取出值且在表格中，通常视作存在该特性
-                            if source == "table":
-                                valid_v.append(f"{f.get('name')}: 勾选")
-                            else:
-                                abnormal.append(f"{f.get('name')}(无有效内容)")
+                            # 确实没有找到有效值
+                            abnormal.append(f"{name}(未识别)")
 
-                    if missing:
+                    # 4. 汇总错误信息
+                    if text_missing:
                         factor_errors.append(
-                            f"❌ 缺失质量特性因子项：{', '.join(missing)}。"
+                            f"❌ 文字描述因子项缺失：{', '.join(text_missing)}。"
                         )
+                    if table_missing:
+                        factor_errors.append(
+                            f"❌ 总结表格因子项缺失：{', '.join(table_missing)}。"
+                        )
+
+                    # 检查一致性 (文字有的表格也得有，文字没的表格也不能有)
+                    text_set = set(
+                        key
+                        for key in [
+                            "distributed",
+                            "performance",
+                            "reliability",
+                            "multiple_sites",
+                        ]
+                        if factors.get(key, {}).get("text_value")
+                        and factors.get(key, {}).get("text_value") != "缺失"
+                    )
+                    table_set = set(
+                        key
+                        for key in [
+                            "distributed",
+                            "performance",
+                            "reliability",
+                            "multiple_sites",
+                        ]
+                        if factors.get(key, {}).get("table_value")
+                        and factors.get(key, {}).get("table_value") != "缺失"
+                    )
+
+                    if text_set != table_set:
+                        factor_errors.append(
+                            "❌ 一致性异常：文字描述的因子集合与总结表格不一致。"
+                        )
+
                     if abnormal:
                         factor_errors.append(
-                            f"❌ 质量特性因子数值异常：{', '.join(abnormal)}。"
+                            f"❌ 因子数值异常或缺失：{', '.join(abnormal)}。"
                         )
 
                     if not factor_errors:
@@ -733,7 +917,7 @@ class TaskCard(QFrame):
                         status = "fail"
                         log = "❌ 附加值因子校验异常：\n" + "\n".join(factor_errors)
                         if valid_v:
-                            log += "\n\n正常项：\n- " + "\n- ".join(valid_v)
+                            log += "\n\n部分正常项：\n- " + "\n- ".join(valid_v)
                 self.steps_widget.set_step_status(4, status)
                 self.task_data["logs"][4] = log
                 self.update_log(4, log)
@@ -747,10 +931,11 @@ class TaskCard(QFrame):
                 else:
                     stats = hierarchy_res.get("statistics", {})
                     miss_count = stats.get("缺失项", 0)
+                    mismatch_count = stats.get("层级不匹配", 0)
                     match_rate_str = stats.get("匹配率", "0%")
-                    
+
                     try:
-                        match_rate_val = float(match_rate_str.strip('%')) / 100.0
+                        match_rate_val = float(match_rate_str.strip("%")) / 100.0
                     except:
                         match_rate_val = 0
 
@@ -758,29 +943,45 @@ class TaskCard(QFrame):
                     if total_excel == 0:
                         status = "warn"
                         log = "⚠️ 层级匹配未执行：Excel 中未找到有效的三级模块数据。"
-                    elif miss_count == 0:
+                    elif miss_count == 0 and mismatch_count == 0:
                         status = "done"
-                        log = f"✅层级匹配通过（匹配率{match_rate_str}）：所有Excel模块均在大纲中找到。"
+                        log = f"✅层级匹配通过（通过率{match_rate_str}）：层级结构完整且一致。"
                     else:
-                        status = "warn"
-                        missing_items = hierarchy_res.get("not_found_in_word", [])
-                        
-                        # 用户要求：同类型的异常（前缀相同）只保留一个示例
+                        # 只要有缺失或者不匹配，都不算“通过”
+                        status = (
+                            "fail" if (miss_count > 0 or mismatch_count > 0) else "warn"
+                        )
+
+                        # 合并统计有缺陷的项
+                        not_found_items = hierarchy_res.get("not_found_in_word", [])
+                        mismatched_items = hierarchy_res.get("hierarchy_mismatched", [])
+                        all_issue_items = not_found_items + mismatched_items
+
                         grouped_logs = {}
-                        for item in missing_items:
+                        for item in all_issue_items:
                             desc = item.get("简略描述", "未知项")
-                            if not desc: continue
+                            if not desc:
+                                continue
                             # 按照“：”分割，提取大类
                             prefix = desc.split("：")[0] if "：" in desc else desc
                             if prefix not in grouped_logs:
                                 grouped_logs[prefix] = desc
-                        
+
                         unique_logs = list(grouped_logs.values())
                         top_failed = unique_logs[:20]
-                        # 确保每一项前面都有换行和圆点
-                        log = f"⚠️层级匹配存在异常（匹配率{match_rate_str}）：\n• " + "\n• ".join(top_failed)
+                        issue_text = (
+                            "缺失及层级不匹配"
+                            if (miss_count > 0 and mismatch_count > 0)
+                            else ("缺失" if miss_count > 0 else "层级不匹配")
+                        )
+                        log = (
+                            f"❌层级匹配发现{issue_text}（通过率{match_rate_str}）：\n• "
+                            + "\n• ".join(top_failed)
+                        )
                         if len(unique_logs) > 20:
-                            log += f"\n• ...等共 {len(unique_logs)} 项不匹配"
+                            log += f"\n• ...等共 {len(unique_logs)} 项常项"
+
+                        log += "\n\n📂 [提示]：点击上方圆圈图标可直接打开详细的 Excel 匹配报告。"
 
                 self.steps_widget.set_step_status(5, status)
                 self.task_data["logs"][5] = log
@@ -801,14 +1002,59 @@ class TaskCard(QFrame):
                         log = f"✅功能过程校验通过（匹配率{match_rate}）：所有功能过程描述均在正文中找到。"
                     else:
                         status = "warn"
-                        not_found = process_res.get('not_found_in_word', [])
-                        names = [f"【{item.get('Excel功能点', '未知')}】" for item in not_found[:2]]
+                        not_found = process_res.get("not_found_in_word", [])
+                        names = [
+                            f"【{item.get('Excel功能点', '未知')}】"
+                            for item in not_found[:2]
+                        ]
                         names_str = "、".join(names)
                         suffix = "等" if len(not_found) > 2 else ""
                         log = f"⚠️功能过程校验不通过（匹配率：{match_rate}）\n{names_str}{suffix}功能过程在需求规格书未体现"
+
+                    log += "\n\n📂 [提示]：点击上方圆圈图标可直接打开详细的 Excel 功能过程匹配报告。"
                 self.steps_widget.set_step_status(6, status)
                 self.task_data["logs"][6] = log
                 self.update_log(6, log)
+
+        elif step_num == 7:
+            move_res = results.get("move_res", {})
+            if move_res:
+                if move_res.get("skipped"):
+                    status = "skipped"
+                    log = "⚪ 数据移动类型校验已跳过。"
+                else:
+                    stats = move_res.get("statistics", {})
+                    failed_count = stats.get("不合规", 0)
+                    total_count = stats.get("总数", 0)
+                    if failed_count == 0 and total_count > 0:
+                        status = "done"
+                        log = f"✅数据移动类型校验通过：共 {total_count} 个功能过程，全部符合 E 开头、W/X 结束的规则。"
+                    elif total_count == 0:
+                        status = "warn"
+                        log = "⚠️ 未发现有效的功能过程数据移动类型数据。"
+                    else:
+                        status = "fail"
+                        items = move_res.get("items", [])
+                        failed_items = [i for i in items if i["result"] != "合规"]
+
+                        error_details = []
+                        for item in failed_items[:10]:
+                            error_details.append(
+                                f"【{item['process']}】({item['moves']}) -> {item['result']} ({item['row_range']}行)"
+                            )
+
+                        log = (
+                            f"❌数据移动类型异常：发现 {failed_count} 处不合规。\n- "
+                            + "\n- ".join(error_details)
+                        )
+                        if len(failed_items) > 10:
+                            log += f"\n- ...等共 {failed_count} 项异常"
+
+                    log += "\n\n📂 [提示]：点击上方圆圈图标可直接打开详细的 Excel 数据移动校验报告。"
+
+                self.steps_widget.set_step_status(7, status)
+                self.task_data["logs"][7] = log
+                self.update_log(7, log)
 
     def on_validation_finished(self, results):
         self.is_running = False
@@ -863,25 +1109,38 @@ class TaskCard(QFrame):
 
         final_log = self.task_data["logs"].get(final_show_step, "")
         if res_dict.get("auto_report_path"):
-            final_log += f"\n\n📂 完整评估报告已自动保存至根目录。"
+            final_log += f"\n\n📂 完整评估报告已自动保存至：{os.path.dirname(res_dict.get('auto_report_path'))}"
 
         self.update_log(final_show_step, final_log)
+
+        # 自动化：完成后自动打开文件夹
+        config = MatcherConfig.load()
+        if config.get("automation", {}).get("auto_open", True):
+            report_path = res_dict.get("auto_report_path")
+            if report_path:
+                open_directory(os.path.dirname(report_path))
 
     def update_log(self, step_num, text):
         color = "#2563eb" if "🔍" in text else "#10b981"
         if "⚠️" in text or "❌" in text:
             color = "#ef4444"
-            
-        # 针对 border-left 依然保持动态设置，但移除 background 和 color 等基础样式映射
-        self.log_panel.setStyleSheet(f"border-left: 4px solid {color};")
-        
+
+        # 针对 border-left 依然保持动态设置，同时确保背景透明且文字颜色正确
+        self.log_panel.setStyleSheet(
+            f"border-left: 4px solid {color}; background-color: transparent;"
+        )
+
         # 转换换行符为 HTML 换行
         html_text = text.replace("\n", "<br/>")
-        
+
         # 使用更灵活的字体控制
-        content_style = "font-family: 'Consolas', 'Microsoft YaHei UI'; font-size: 13px;"
-        
-        self.log_panel.setText(f"<b style='color:{color}; font-family:\"Microsoft YaHei UI\"; font-size:14px;'>第 {step_num} 步:</b><br/><span style='{content_style}'>{html_text}</span>")
+        content_style = (
+            "font-family: 'Consolas', 'Microsoft YaHei UI'; font-size: 15px;"
+        )
+
+        self.log_panel.setText(
+            f"<b style='color:{color}; font-family:\"Microsoft YaHei UI\"; font-size:16px;'>第 {step_num} 步:</b><br/><span style='{content_style}'>{html_text}</span>"
+        )
 
     def on_label_clicked(self, step_num):
         """点击文字：仅展示日志"""
@@ -915,6 +1174,17 @@ class TaskCard(QFrame):
                     os.startfile(path)
                 except Exception as e:
                     self.update_log(6, f"❌ 无法打开报告文件: {e}")
+            else:
+                self.on_label_clicked(step_num)
+        elif step_num == 7:
+            # 尝试打开数据移动类型报告
+            results = self.task_data.get("validation_results", [{}])[0]
+            path = results.get("move_res", {}).get("report_path")
+            if path and os.path.exists(path):
+                try:
+                    os.startfile(path)
+                except Exception as e:
+                    self.update_log(7, f"❌ 无法打开报告文件: {e}")
             else:
                 self.on_label_clicked(step_num)
         else:
