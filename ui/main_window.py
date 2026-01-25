@@ -144,6 +144,23 @@ class CosmicMainWindow(QMainWindow):
         biz_layout.addWidget(upload_btn)
         biz_layout.addWidget(receipt_btn)
         biz_layout.addWidget(re_review_btn)
+
+        biz_layout.addSpacing(20)
+
+        open_initial_btn = self._create_shortcut_btn(
+            "打开初评文件夹", "#3b82f6", lambda: self.open_storage_dir("initial_review")
+        )
+        open_receipt_btn = self._create_shortcut_btn(
+            "打开回单文件夹", "#10b981", lambda: self.open_storage_dir("receipt")
+        )
+        open_re_review_btn = self._create_shortcut_btn(
+            "打开重评文件夹", "#f59e0b", lambda: self.open_storage_dir("re_review")
+        )
+
+        biz_layout.addWidget(open_initial_btn)
+        biz_layout.addWidget(open_receipt_btn)
+        biz_layout.addWidget(open_re_review_btn)
+
         biz_layout.addStretch()
 
         # 2. 系统清理卡片
@@ -159,16 +176,20 @@ class CosmicMainWindow(QMainWindow):
         clean_layout.addWidget(clean_title)
 
         clean_initial = self._create_shortcut_btn(
-            "清空初评文件", "#64748b", lambda: self.clear_files("initial_review")
+            "清空初评文件", "#6366f1", lambda: self.clear_files("initial_review")
         )
         clean_logs = self._create_shortcut_btn(
-            "清空日志文件", "#64748b", lambda: self.clear_files("logs")
+            "清空日志文件", "#8b5cf6", lambda: self.clear_files("logs")
         )
         clean_receipt = self._create_shortcut_btn(
-            "清空回单文件", "#64748b", lambda: self.clear_files("receipt")
+            "清空回单文件", "#ec4899", lambda: self.clear_files("receipt")
         )
         clean_re_review = self._create_shortcut_btn(
-            "清空重评文件", "#64748b", lambda: self.clear_files("re_review")
+            "清空重评文件", "#f43f5e", lambda: self.clear_files("re_review")
+        )
+
+        clean_temp = self._create_shortcut_btn(
+            "清空临时压缩文件", "#14b8a6", lambda: self.clear_files("extraction")
         )
 
         all_clear_btn = QPushButton("🔥 一键清空全部文件")
@@ -177,9 +198,19 @@ class CosmicMainWindow(QMainWindow):
         all_clear_btn.setStyleSheet(
             """
             QPushButton {
-                background-color: #ef4444; color: white; border-radius: 10px; font-weight: bold; border: none; font-size: 14px;
+                background-color: #ef4444;
+                color: white;
+                border-radius: 8px;
+                font-weight: bold;
+                border: none;
+                font-size: 14px;
             }
-            QPushButton:hover { background-color: #dc2626; }
+            QPushButton:hover {
+                background-color: #dc2626;
+            }
+            QPushButton:pressed {
+                background-color: #b91c1c;
+            }
         """
         )
         all_clear_btn.clicked.connect(self.clear_all_files)
@@ -188,6 +219,7 @@ class CosmicMainWindow(QMainWindow):
         clean_layout.addWidget(clean_logs)
         clean_layout.addWidget(clean_receipt)
         clean_layout.addWidget(clean_re_review)
+        clean_layout.addWidget(clean_temp)
         clean_layout.addWidget(all_clear_btn)
         clean_layout.addStretch()
 
@@ -217,35 +249,49 @@ class CosmicMainWindow(QMainWindow):
     def _refresh_shortcut_btn_style(self, btn):
         color = btn.property("theme_color")
         if self.is_dark_mode:
-            # 深色模式：深色背景，彩色边框和文字
+            # 深色模式：更加扎实的卡片感
             btn.setStyleSheet(
                 f"""
                 QPushButton {{
-                    color: {color};
-                    border: 1px solid {color};
-                    background-color: #111827;
+                    color: #f3f4f6;
+                    border: 1px solid #374151;
+                    background-color: #1f2937;
+                    border-radius: 10px;
                     font-size: 14px;
+                    font-weight: 500;
+                    padding: 12px;
+                    text-align: center;
                 }}
                 QPushButton:hover {{
-                    background-color: {color};
-                    color: white;
+                    background-color: #374151;
+                    border-color: {color};
+                    border-width: 2px;
+                }}
+                QPushButton:pressed {{
+                    background-color: #111827;
                 }}
             """
             )
         else:
-            # 浅色模式：默认使用黑色文字，悬停/点击使用蓝色背景并白色文字
+            # 浅色模式：经典的卡片投影感
             btn.setStyleSheet(
                 f"""
                 QPushButton {{
-                    color: #000000;
-                    border: 1px solid {color};
-                    background-color: white;
+                    color: #1e293b;
+                    border: 1px solid #e2e8f0;
+                    background-color: #ffffff;
+                    border-radius: 10px;
                     font-size: 14px;
+                    font-weight: 600;
+                    padding: 12px;
                 }}
-                QPushButton:hover, QPushButton:pressed {{
-                    background-color: #66ccff;
-                    border-color: #66ccff;
-                    color: white;
+                QPushButton:hover {{
+                    border-color: {color};
+                    border-width: 2px;
+                    background-color: #f8fafc;
+                }}
+                QPushButton:pressed {{
+                    background-color: #f1f5f9;
                 }}
             """
             )
@@ -276,7 +322,7 @@ class CosmicMainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "危险操作",
-            "确定要清空初评、日志、回单、重评全部四个目录吗？",
+            "确定要清空初评、日志、回单、重评以及临时压缩全部目录吗？",
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
@@ -285,7 +331,7 @@ class CosmicMainWindow(QMainWindow):
         from utils.path_utils import clear_directory
 
         config = MatcherConfig.load()
-        keys = ["initial_review", "logs", "receipt", "re_review"]
+        keys = ["initial_review", "logs", "receipt", "re_review", "extraction"]
         results = []
         for key in keys:
             path = config.get("storage", {}).get(key)
@@ -294,6 +340,14 @@ class CosmicMainWindow(QMainWindow):
                 results.append(f"{key}: 已清理")
 
         QMessageBox.information(self, "完成", "\n".join(results))
+
+    def open_storage_dir(self, storage_key):
+        config = MatcherConfig.load()
+        path = config.get("storage", {}).get(storage_key)
+        if path and os.path.exists(path):
+            open_directory(path)
+        else:
+            QMessageBox.warning(self, "警告", f"目录不存在或未配置: {path}")
 
     def _create_placeholder_page(self, text):
         page = QWidget()
@@ -371,13 +425,21 @@ class CosmicMainWindow(QMainWindow):
         if hasattr(self, "re_review_task_layout"):
             for i in range(self.re_review_task_layout.count()):
                 item = self.re_review_task_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), ReReviewTaskCard):
+                if (
+                    item
+                    and item.widget()
+                    and isinstance(item.widget(), ReReviewTaskCard)
+                ):
                     item.widget().update_theme_style()
 
         if hasattr(self, "receipt_task_layout"):
             for i in range(self.receipt_task_layout.count()):
                 item = self.receipt_task_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), ReReviewTaskCard):
+                if (
+                    item
+                    and item.widget()
+                    and isinstance(item.widget(), ReReviewTaskCard)
+                ):
                     item.widget().update_theme_style()
 
         # 应用原生标题栏深色模式
@@ -669,63 +731,123 @@ class CosmicMainWindow(QMainWindow):
         # 1. 自动跳转到回单页面 (index 2)
         self.sidebar.on_item_clicked(2)
 
-        # 2. 创建一个任务卡片并插入
-        task_info = {
-            "project_name": data["project_name"],
-            "type": "回单生成",
-            "time": datetime.now().strftime("%H:%M:%S"),
-        }
-        card = ReReviewTaskCard(task_info)
-        # 修改卡片上的按钮文字和状态
-        card.excel1_btn.setText("评估报告(已回写)")
-        card.excel2_btn.setText("评估确认单(Word)")
+        # 检查是否为批量任务
+        is_batch = data.get("is_batch", False)
+        batch_tasks = data.get("tasks", []) if is_batch else [data]
 
-        self.receipt_task_layout.insertWidget(0, card)
+        # 存储卡片以便后续更新 {index: card_widget}
+        card_map = {}
+
+        # 2. 为每个任务创建卡片
+        # 注意：列表是倒序插入，为了保持顺序一致性，我们先生成卡片对象列表，再倒序插入布局
+        new_cards = []
+        for i, task_data in enumerate(batch_tasks):
+            task_info = {
+                "project_name": task_data["project_name"],
+                "type": "回单生成",
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "status_text": "等待处理..." if is_batch and i > 0 else "正在处理...",
+            }
+            card = ReReviewTaskCard(task_info)
+            card.excel1_btn.setText("评估报告(已回写)")
+            card.excel2_btn.setText("评估确认单(Word)")
+            new_cards.append(card)
+            card_map[i] = card
+
+        # 倒序插入布局，这样第一个任务在最上面
+        for card in reversed(new_cards):
+            self.receipt_task_layout.insertWidget(0, card)
 
         from utils.receipt_processor import ReceiptWorker
 
-        project_name = os.path.basename(data.get("eval_report_path", "Receipt"))
-        worker = ReceiptWorker(data, project_name)
+        # 确定项目名称前缀
+        if is_batch:
+            project_base = data.get("project_name", "Batch_Receipts")
+        elif data.get("is_merge"):
+            groups = data.get("file_groups", {})
+            first_group = list(groups.values())[0] if groups else {}
+            report_for_name = first_group.get("eval_report", "Merged")
+            project_base = os.path.basename(report_for_name)
+        else:
+            project_base = os.path.basename(data.get("eval_report_path", "Receipt"))
+
+        # 3. 初始化 Worker (传入整个 data，如果是 batch，worker 会自己处理)
+        worker = ReceiptWorker(data, project_base)
 
         if not hasattr(self, "receipt_workers"):
             self.receipt_workers = []
         self.receipt_workers.append(worker)
 
-        # 3. 连接信号
-        # finished 信号现在返回字典，包含输出路径和统计数据
-        def on_finished(result):
-            if isinstance(result, dict):
+        # 4. 连接信号
+
+        def on_item_finished(idx, result):
+            if idx in card_map:
+                card = card_map[idx]
+
+                # Check for error first
+                if result.get("error"):
+                    card.set_error(result["error"])
+                    return
+
                 word_path = result.get("output_path")
                 stats = result.get("stats", {})
-            else:
-                # 后向兼容：如果直接返回字符串路径
-                word_path = result
-                stats = {}
+                excel_reports = result.get("excel_reports", [])
 
-            card.set_completed(excel1=data["eval_report_path"], excel2=word_path)
-            card.log_label.setText(
-                f"✅ 生成成功！文件已保存至：{os.path.dirname(word_path)}"
-            )
-            # 更新输出目录
-            card.task_info["output_dir"] = os.path.dirname(word_path)
+                report_for_card = excel_reports[0] if excel_reports else None
 
-            # 显示统计数据
-            if stats:
-                card.update_stats(stats)
+                card.set_completed(excel1=report_for_card, excel2=word_path)
+                card.log_label.setText(f"✅ 生成成功！已保存")
+                card.task_info["output_dir"] = os.path.dirname(word_path)
+                if stats:
+                    card.update_stats(stats)
+                    # 更新真实项目名称
+                    if isinstance(stats, list):
+                        # 如果是合并任务，stats 是一个列表，取最后一个（汇总）或尝试从列表中找
+                        if stats:
+                            summary = stats[-1]
+                            if summary.get("real_project_name"):
+                                card.update_title(summary["real_project_name"])
+                    elif isinstance(stats, dict) and stats.get("real_project_name"):
+                        card.update_title(stats["real_project_name"])
 
-            # 自动化：打开文件夹
-            config = MatcherConfig.load()
-            if config.get("automation", {}).get("auto_open", True):
-                open_directory(os.path.dirname(word_path))
+        worker.item_finished.connect(on_item_finished)
+
+        # 处理整体完成
+        def on_finished(result):
+            # 如果不是批量模式，这里还需处理单个结果(兼容)
+            if not is_batch:
+                # 单个任务模式下，Worker 只会发 finished 不发 item_finished
+                if 0 in card_map:  # 只有一个卡片
+                    on_item_finished(0, result)
+
+            # 批量模式全部完成后，可以做一些清理或通知
+            # 自动化：打开文件夹 (取最后一个路径)
+            if isinstance(result, dict) and result.get("output_path"):
+                word_path = result.get("output_path")
+                config = MatcherConfig.load()
+                if config.get("automation", {}).get("auto_open", True):
+                    open_directory(os.path.dirname(word_path))
+            elif is_batch and batch_tasks:
+                # 批量模式结束，打开第一个任务的目录即可
+                output_dir = MatcherConfig.load().get("storage", {}).get("receipt")
+                if output_dir and os.path.exists(output_dir):
+                    if (
+                        MatcherConfig.load()
+                        .get("automation", {})
+                        .get("auto_open", True)
+                    ):
+                        open_directory(output_dir)
 
         worker.finished.connect(on_finished)
 
         def on_error(msg):
-            card.set_error(msg)
-            card.log_label.setText(f"❌ 失败: {msg}")
-            card.log_label.setStyleSheet(
-                "font-size: 12px; color: #ef4444; margin-top: 2px;"
-            )
+            # 这里简单处理：如果是全局错误，把所有未完成的卡片都设为错误
+            # 但实际上 Worker 内部处理每个 item 异常，不会轻易抛出全局异常
+            # 除非是完全无法启动
+            for card in card_map.values():
+                # 只有还没完成的显示错误
+                if card.files_widget.isHidden():
+                    card.set_error(msg)
 
         worker.error.connect(on_error)
         worker.finished.connect(lambda: self.receipt_workers.remove(worker))

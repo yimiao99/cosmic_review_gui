@@ -85,6 +85,13 @@ class SettingsWidget(QWidget):
             self.config.get("storage", {}).get("logs", ""),
         )
 
+        # 解压路径
+        self.extraction_path_edit = self._add_path_setting(
+            storage_group.layout(),
+            "解压临时存放位置",
+            self.config.get("storage", {}).get("extraction", ""),
+        )
+
         scroll_layout.addWidget(storage_group)
 
         # 2. 外观主题设置
@@ -299,6 +306,11 @@ class SettingsWidget(QWidget):
             "logs": (
                 os.path.normpath(self.logs_path_edit.text())
                 if self.logs_path_edit.text()
+                else ""
+            ),
+            "extraction": (
+                os.path.normpath(self.extraction_path_edit.text())
+                if self.extraction_path_edit.text()
                 else ""
             ),
         }

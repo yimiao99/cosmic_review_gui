@@ -111,8 +111,9 @@ class ReportGenerator:
                     lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) else x
                 )
 
-            # 确定文件名: xxx项目模板校验评估报告.xlsx
-            base_filename = f"{clean_name}模板校验评估报告.xlsx"
+            # 确定文件名: xxx项目_时间_模板校验评估报告.xlsx
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_filename = f"{clean_name}_{timestamp}_模板校验评估报告.xlsx"
             target_path = os.path.join(output_dir, base_filename)
 
             # 防占用处理：如果文件已存在且无法写入，尝试生成副本
@@ -130,6 +131,23 @@ class ReportGenerator:
                     name, ext = os.path.splitext(base_filename)
                     final_path = os.path.join(output_dir, f"{name}({counter}){ext}")
                     counter += 1
+
+            # 备份之前的版本（如果文件已存在）
+            if os.path.exists(target_path) and target_path != final_path:
+                try:
+                    backup_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    backup_name = f"{clean_name}模板校验评估报告_bak_{backup_time}.xlsx"
+                    backup_path = os.path.join(output_dir, backup_name)
+                    if os.path.exists(target_path):
+                        # 仅在非占用状态下备份
+                        try:
+                            import shutil
+
+                            shutil.copy2(target_path, backup_path)
+                        except:
+                            pass
+                except:
+                    pass
 
             # 使用 ExcelWriter 保存，带一点样式
             with pd.ExcelWriter(final_path, engine="openpyxl") as writer:

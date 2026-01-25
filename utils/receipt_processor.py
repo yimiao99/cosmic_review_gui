@@ -4,8 +4,10 @@ import pandas as pd
 import openpyxl
 from datetime import datetime
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.enum.text import WD_COLOR_INDEX
+from docx.enum.text import WD_COLOR_INDEX, WD_LINE_SPACING
+from docx.shared import Pt
 from PySide6.QtCore import QThread, Signal
 from extend.matcher_config import MatcherConfig
 
@@ -13,6 +15,7 @@ from extend.matcher_config import MatcherConfig
 class ReceiptWorker(QThread):
     """异步处理回单生成的线程"""
 
+    item_finished = Signal(int, dict)  # 单个子项完成信号 (index, result)
     finished = Signal(dict)  # 改为发送字典，包含路径和统计数据
     error = Signal(str)
 
@@ -29,8 +32,27 @@ class ReceiptWorker(QThread):
         RuntimeLogger.log("开始生成回单...")
 
         try:
-            output_path, stats = ReceiptProcessor.generate(self.data)
-            self.finished.emit({"output_path": output_path, "stats": stats})
+            # 检查是否为批量任务
+            is_batch = self.data.get("is_batch", False)
+            if is_batch and "tasks" in self.data:
+                tasks = self.data["tasks"]
+                last_result = None
+                for i, task_data in enumerate(tasks):
+                    try:
+                        # 逐个生成
+                        result = ReceiptProcessor.generate(task_data)
+                        self.item_finished.emit(i, result)
+                        last_result = result
+                    except Exception as sub_e:
+                        print(f"批量任务第 {i} 项生成失败: {sub_e}")
+                        self.item_finished.emit(i, {"error": str(sub_e)})
+
+                # 全部完成后发送最后的结果 (or a summary)
+                self.finished.emit(last_result or {"error": "无有效任务"})
+            else:
+                # 单个任务
+                result = ReceiptProcessor.generate(self.data)
+                self.finished.emit(result)
         except Exception as e:
             import traceback
 
@@ -43,6 +65,18 @@ class ReceiptProcessor:
 
     @staticmethod
     def generate(data):
+        is_merge = data.get("is_merge", False)
+
+        if is_merge and data.get("file_groups"):
+            # 合并模式:处理多个子项目
+            return ReceiptProcessor._generate_merged(data)
+        else:
+            # 单项目模式:保持现有逻辑
+            return ReceiptProcessor._generate_single(data)
+
+    @staticmethod
+    def _generate_single(data):
+        """单项目模式:原有的处理逻辑"""
         # 1. 提取评估报告数据 (如果存在)
         fp_data = {}
         if data.get("eval_report_path"):
@@ -67,17 +101,65 @@ class ReceiptProcessor:
             )
         else:
             consent_data = {
-                "submission_days": "N/A",
-                "eval_days": "N/A",
-                "reduction_ratio": "N/A",
+                "submission_days": "0.00",
+                "eval_days": "0.00",
+                "reduction_ratio": "0.00%",
             }
+
+        # 【优化】如果评估报告中有“送审人天”和“核定人天”，优先使用报告的数据
+        # 即使认同表里有数据，也可能因为单元格不规范导致解析失败，报告往往更准
+        if (
+            fp_data.get("submission_days")
+            and str(fp_data.get("submission_days")) != "0"
+        ):
+            consent_data["submission_days"] = fp_data["submission_days"]
+        if fp_data.get("eval_days") and str(fp_data.get("eval_days")) != "0":
+            consent_data["eval_days"] = fp_data["eval_days"]
+
+        # 重新计算核减率
+        try:
+            sub = float(str(consent_data.get("submission_days", "0")).replace(",", ""))
+            ev = float(str(consent_data.get("eval_days", "0")).replace(",", ""))
+            if sub > 0:
+                ratio = (sub - ev) / sub
+                consent_data["reduction_ratio"] = f"{ratio:.2%}"
+            else:
+                consent_data["reduction_ratio"] = "0.00%"
+        except:
+            pass
 
         # 3. 选择模式 (严格对应按钮选择)
         mode = str(data.get("submission_mode", "线上"))  # 默认线上
 
         # 4. 合并所有需要填充的数据
+        # 【新逻辑】清理项目名称中的冗余后缀（如 评估报告、日期、项目编号等）
+        display_name = data["project_name"].strip()
+
+        # 1. 递归清理常见关键词和噪音
+        trash_patterns = [
+            r"评估报告\s*$",
+            r"结论认同表\s*$",
+            r"认同表\s*$",
+            r"核定表\s*$",
+            r"确认单\s*$",
+            r"202[4-6][-_]?\d{2,4}\s*$",  # 完整日期如 2026-0124
+            r"[-_—]?\d{4,5}\s*$",  # 结尾的 4-5 位数字如 -1202 或 1202
+            r"[-_]?V\d+(\.\d+)?\s*$",  # 版本号如 -V1.0
+            r"副本$",
+            r"\(副本\)",
+        ]
+        for pattern in trash_patterns:
+            display_name = re.sub(
+                pattern, "", display_name, flags=re.IGNORECASE
+            ).strip()
+
+        # 2. 特殊处理：如果已经以“项目”结尾，又被误伤了或者带了空格，清理它
+        display_name = display_name if display_name else data["project_name"]
+        if display_name.endswith("项目"):
+            pass  # 保持原样
+
         context = {
-            "project_name": data["project_name"],
+            "project_name": display_name,
             "project_id": data["project_id"],
             "submission_unit": data["submission_unit"],
             "submitter": data["submitter"],
@@ -103,7 +185,13 @@ class ReceiptProcessor:
         doc = Document(template_path)
         ReceiptProcessor._fill_template(doc, context)
 
-        output_name = f"{data['project_name']}项目评估确认单.docx"
+        # 【优化】文件名逻辑：使用清理后的 context["project_name"] 并防止“项目项目”
+        final_display_name = context["project_name"]
+        if final_display_name.endswith("项目"):
+            output_name = f"{final_display_name}评估确认单.docx"
+        else:
+            output_name = f"{final_display_name}项目评估确认单.docx"
+
         # 从配置中加载回单存放位置
         config = MatcherConfig.load()
         output_dir = config.get("storage", {}).get("receipt")
@@ -163,7 +251,374 @@ class ReceiptProcessor:
             "reduction_ratio": consent_data.get("reduction_ratio", "0.00%"),
         }
 
-        return final_path, stats
+        return {
+            "output_path": final_path,
+            "stats": stats,
+            "excel_reports": (
+                [data.get("eval_report_path")] if data.get("eval_report_path") else []
+            ),
+        }
+
+    @staticmethod
+    def _extract_sub_project_name(consent_path, project_name):
+        """
+        提取子项目名称
+        优先级:
+        1. 从结论认同表A3单元格提取
+        2. 从文件名提取(去掉项目名称前缀)
+        """
+        sub_name = ""
+        try:
+            wb = openpyxl.load_workbook(consent_path, data_only=True)
+            # 尝试从第一个sheet的A3获取
+            ws = wb.active
+            a3_value = ws["A3"].value
+            wb.close()
+
+            if a3_value and isinstance(a3_value, str) and a3_value.strip():
+                # 去掉项目名称前缀
+                candidate = a3_value.strip()
+                # 过滤掉明显的无效名称
+                invalid_keywords = [
+                    "功能点拆分",
+                    "功能规模",
+                    "确认单",
+                    "认同表",
+                    "计算公式",
+                ]
+                if not any(k in candidate for k in invalid_keywords):
+                    sub_name = candidate
+                    if project_name in sub_name:
+                        sub_name = sub_name.replace(project_name, "").strip()
+        except:
+            pass
+
+        if not sub_name:
+            # 备选:从文件名提取
+            filename = os.path.basename(consent_path)
+            # 去掉扩展名和项目名称
+            sub_name = filename.replace(".xlsx", "").replace(".xls", "")
+            if project_name in sub_name:
+                sub_name = sub_name.replace(project_name, "").strip()
+
+            # 进一步清理文件名中的垃圾信息
+            trash_words = ["结论认同表", "核定单", "评估报告", "V1", "V2", "副本"]
+            for tw in trash_words:
+                sub_name = sub_name.replace(tw, "")
+
+        # 【优化】清理常见的连接符和括号
+        if sub_name:
+            sub_name = re.sub(r"^[-_—\s]+", "", sub_name)
+            sub_name = re.sub(r"[-_—\s]+$", "", sub_name)
+            if (sub_name.startswith("(") and sub_name.endswith(")")) or (
+                sub_name.startswith("（") and sub_name.endswith("）")
+            ):
+                sub_name = sub_name[1:-1].strip()
+
+        return sub_name or "子项目"
+
+    @staticmethod
+    def _generate_merged(data):
+        """
+        处理合并模式:多个子项目
+        """
+        from utils.runtime_logger import RuntimeLogger
+
+        file_groups = data["file_groups"]
+        # 【新逻辑】清理项目名称
+        project_name = data["project_name"].strip()
+        trash_patterns = [
+            r"评估报告\s*$",
+            r"结论认同表\s*$",
+            r"认同表\s*$",
+            r"核定表\s*$",
+            r"确认单\s*$",
+            r"202[4-6][-_]?\d{2,4}\s*$",
+            r"[-_—]?\d{4,5}\s*$",
+            r"[-_]?V\d+(\.\d+)?\s*$",
+            r"副本$",
+        ]
+        for pattern in trash_patterns:
+            project_name = re.sub(
+                pattern, "", project_name, flags=re.IGNORECASE
+            ).strip()
+
+        project_name = project_name if project_name else data["project_name"]
+        project_name = project_name.strip(" -_—")
+
+        RuntimeLogger.log(
+            f"开始处理合并任务: {project_name}, 子项目数量: {len(file_groups)}"
+        )
+
+        # 调试日志：列出文件组
+        for gk, fv in file_groups.items():
+            RuntimeLogger.log(
+                f"待处理文件组: {gk} -> {os.path.basename(fv.get('eval_report',''))}"
+            )
+
+        sub_projects = []
+        all_stats = []
+
+        for group_name, files in file_groups.items():
+            report_path = files.get("eval_report")
+            consent_path = files.get("eval_consent")
+
+            if not report_path or not consent_path:
+                RuntimeLogger.log(f"跳过不完整的子项目组: {group_name}", "warning")
+                continue
+
+            # 1. 提取子项目名称
+            sub_name = ReceiptProcessor._extract_sub_project_name(
+                consent_path, project_name
+            )
+            RuntimeLogger.log(f"--- 处理子项目: {sub_name} ---")
+
+            # 2. 解析数据
+            fp_data = ReceiptProcessor._parse_eval_report(report_path)
+            consent_data = ReceiptProcessor._parse_consent_form(consent_path)
+
+            # 3. 数据融合：优先使用报告里的人天数据
+            if fp_data.get("submission_days"):
+                val = str(fp_data.get("submission_days")).strip()
+                if (
+                    val
+                    and val.lower() != "none"
+                    and val.lower() != "n/a"
+                    and val != "0"
+                    and val != "0.00"
+                ):
+                    consent_data["submission_days"] = val
+                    RuntimeLogger.log(f"已采用评估报告中的送审人天: {val}")
+
+            if fp_data.get("eval_days"):
+                val = str(fp_data.get("eval_days")).strip()
+                if (
+                    val
+                    and val.lower() != "none"
+                    and val.lower() != "n/a"
+                    and val != "0"
+                    and val != "0.00"
+                ):
+                    consent_data["eval_days"] = val
+                    RuntimeLogger.log(f"已采用评估报告中的核定人天: {val}")
+
+            # 4. 计算核减率 (针对单个子项目)
+            try:
+                sub_val = float(
+                    str(consent_data.get("submission_days", 0))
+                    .replace(",", "")
+                    .replace("人天", "")
+                )
+                ev_val = float(
+                    str(consent_data.get("eval_days", 0))
+                    .replace(",", "")
+                    .replace("人天", "")
+                )
+                if sub_val > 0:
+                    reduction_ratio = f"{(sub_val - ev_val) / sub_val:.2%}"
+                else:
+                    reduction_ratio = "0.00%"
+            except:
+                reduction_ratio = "0.00%"
+
+            # 5. 组装子项目数据 (用于 Word)
+            sub_project_data = {
+                "sub_project_name": sub_name,
+                "submission_fp": fp_data.get("total_fp", 0),
+                "submission_days": consent_data.get("submission_days", "0"),
+                "new_fp": fp_data.get("new_fp", 0),
+                "new_ratio": fp_data.get("new_ratio", "0%"),
+                "reuse_fp": fp_data.get("reuse_fp", 0),
+                "reuse_ratio": fp_data.get("reuse_ratio", "0%"),
+                "legacy_fp": fp_data.get("legacy_fp", 0),
+                "legacy_ratio": fp_data.get("legacy_ratio", "0%"),
+                "eval_days": consent_data.get("eval_days", "0"),
+            }
+            sub_projects.append(sub_project_data)
+
+            # 6. 组装统计数据 (用于 UI)
+            stats = {
+                "sub_project_name": sub_name,
+                "new_fp": fp_data.get("new_fp", 0),
+                "reuse_fp": fp_data.get("reuse_fp", 0),
+                "legacy_fp": fp_data.get("legacy_fp", 0),
+                "total_fp": fp_data.get("total_fp", 0),
+                "new_ratio": fp_data.get("new_ratio", "0.0%"),
+                "reuse_ratio": fp_data.get("reuse_ratio", "0.0%"),
+                "legacy_ratio": fp_data.get("legacy_ratio", "0.0%"),
+                "submission_days": consent_data.get("submission_days", "0.00"),
+                "eval_days": consent_data.get("eval_days", "0.00"),
+                "reduction_ratio": reduction_ratio,
+            }
+            all_stats.append(stats)
+
+            # 7. 回写结果到 Excel
+            context_to_write = {
+                "project_name": project_name,
+                "_consent_path": consent_path,
+                **fp_data,
+                **consent_data,
+                "reduction_ratio": reduction_ratio,
+            }
+            try:
+                ReceiptProcessor._write_back_to_excel(report_path, context_to_write)
+            except Exception as e:
+                RuntimeLogger.log(f"回写Excel失败: {str(e)}", "warning")
+
+        # 8. 计算汇总数据
+        total_stats = ReceiptProcessor._calculate_total_stats(sub_projects)
+        RuntimeLogger.log(
+            f"汇总计算完成: 总送审 {total_stats['total_submission_days']}, 总核定 {total_stats['total_eval_days']}, 整体核减率 {total_stats['total_reduction_ratio']}"
+        )
+
+        # 9. 将汇总数据加入 all_stats 供 UI 显示
+        all_stats.append(
+            {
+                "is_total": True,
+                "sub_project_name": "汇总合计",
+                "new_fp": total_stats["new_fp"],
+                "reuse_fp": total_stats["reuse_fp"],
+                "legacy_fp": total_stats["legacy_fp"],
+                "total_fp": total_stats["total_fp"],
+                "new_ratio": total_stats["new_ratio"],
+                "reuse_ratio": total_stats["reuse_ratio"],
+                "legacy_ratio": total_stats["legacy_ratio"],
+                "submission_days": total_stats["total_submission_days"],
+                "eval_days": total_stats["total_eval_days"],
+                "reduction_ratio": total_stats["total_reduction_ratio"],
+            }
+        )
+
+        # 10. 填充 Word 模板
+        context_word = {
+            "project_name": project_name,
+            "project_id": data["project_id"],
+            "submission_unit": data["submission_unit"],
+            "submitter": data["submitter"],
+            "submission_time": data["submission_time"],
+            "submission_mode": "合并",
+            "is_merge": True,
+            "sub_projects": sub_projects,
+            "sub_project_count": len(sub_projects),
+            "submission_days": total_stats["total_submission_days"],
+            "eval_days": total_stats["total_eval_days"],
+            "reduction_ratio": total_stats["total_reduction_ratio"],
+            **total_stats,
+        }
+
+        template_name = "XXXXXXX项目评估确认单 - 合并.docx"
+        template_path = os.path.join("folder", template_name)
+        if not os.path.exists(template_path):
+            template_path = os.path.join(
+                os.path.dirname(__file__), "..", "folder", template_name
+            )
+
+        if not os.path.exists(template_path):
+            RuntimeLogger.log(f"找不到合并模板: {template_path}", "error")
+            raise FileNotFoundError(f"找不到合并模板: {template_path}")
+
+        doc = Document(template_path)
+        ReceiptProcessor._fill_template(doc, context_word)
+
+        # 11. 保存 Word
+        config = MatcherConfig.load()
+        output_dir = config.get("storage", {}).get("receipt", ".")
+
+        # 【优化】文件名逻辑：防止“项目项目”
+        if project_name.endswith("项目"):
+            output_name = f"{project_name}评估确认单.docx"
+        else:
+            output_name = f"{project_name}项目评估确认单.docx"
+
+        final_path = os.path.join(output_dir, output_name)
+
+        counter = 1
+        while True:
+            try:
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                doc.save(final_path)
+                break
+            except (IOError, PermissionError):
+                base, ext = os.path.splitext(output_name)
+                final_path = os.path.join(output_dir, f"{base}({counter}){ext}")
+                counter += 1
+
+        RuntimeLogger.log(f"确认单生成成功: {os.path.basename(final_path)}")
+
+        excel_reports = [f["eval_report"] for f in file_groups.values()]
+        return {
+            "output_path": final_path,
+            "stats": all_stats,
+            "excel_reports": excel_reports,
+        }
+
+    @staticmethod
+    def _calculate_total_stats(sub_projects):
+        """
+        计算所有子项目的汇总数据
+        """
+        total_submission_days = 0.0
+        total_eval_days = 0.0
+        total_new_fp = 0
+        total_reuse_fp = 0
+        total_legacy_fp = 0
+
+        for sub in sub_projects:
+            try:
+                days = (
+                    str(sub.get("submission_days", "0"))
+                    .replace(",", "")
+                    .replace("人天", "")
+                )
+                total_submission_days += float(days)
+            except:
+                pass
+            try:
+                days = (
+                    str(sub.get("eval_days", "0")).replace(",", "").replace("人天", "")
+                )
+                total_eval_days += float(days)
+            except:
+                pass
+            try:
+                total_new_fp += int(float(str(sub["new_fp"]).replace(",", "")))
+            except:
+                pass
+            try:
+                total_reuse_fp += int(float(str(sub["reuse_fp"]).replace(",", "")))
+            except:
+                pass
+            try:
+                total_legacy_fp += int(float(str(sub["legacy_fp"]).replace(",", "")))
+            except:
+                pass
+
+        total_fp = total_new_fp + total_reuse_fp + total_legacy_fp
+
+        def safe_ratio(part, total):
+            if total == 0:
+                return "0.0%"
+            return f"{(part / total):.1%}"
+
+        # 计算核减比例
+        if total_submission_days > 0:
+            reduction_ratio = (1 - total_eval_days / total_submission_days) * 100
+        else:
+            reduction_ratio = 0.0
+
+        return {
+            "total_submission_days": f"{total_submission_days:.2f}",
+            "total_eval_days": f"{total_eval_days:.2f}",
+            "total_reduction_ratio": f"{reduction_ratio:.2f}%",
+            "new_fp": total_new_fp,
+            "reuse_fp": total_reuse_fp,
+            "legacy_fp": total_legacy_fp,
+            "total_fp": total_fp,
+            "new_ratio": safe_ratio(total_new_fp, total_fp),
+            "reuse_ratio": safe_ratio(total_reuse_fp, total_fp),
+            "legacy_ratio": safe_ratio(total_legacy_fp, total_fp),
+        }
 
     @staticmethod
     def _write_back_to_excel(path, context):
@@ -279,73 +734,382 @@ class ReceiptProcessor:
     @staticmethod
     def _parse_eval_report(path):
         """解析评估报告获取项目统计 (严格基于复用度列行数统计)"""
+        from utils.runtime_logger import RuntimeLogger
+
+        RuntimeLogger.log(f"解析评估报告: {os.path.basename(path)}")
+
         try:
             df_dict = pd.read_excel(path, sheet_name=None)
         except Exception as e:
+            RuntimeLogger.log(f"无法读取评估报告: {str(e)}", "error")
             raise RuntimeError(f"无法读取评估报告: {str(e)}")
 
+        # 尝试查找所有可能的数据点
+        report_results = {
+            "total_fp": 0,
+            "new_fp": 0,
+            "reuse_fp": 0,
+            "legacy_fp": 0,
+            "new_ratio": "0.0%",
+            "reuse_ratio": "0.0%",
+            "legacy_ratio": "0.0%",
+            "submission_days": None,
+            "eval_days": None,
+        }
+
+        # 1. 首先尝试从“汇总”或带有关键词的工作表提取人天
+        found_sub = False
+        found_eval = False
+
+        all_sheets = list(df_dict.keys())
+        RuntimeLogger.log(f"开始提取人天数据，所有工作表: {all_sheets}")
+
+        for name, df in df_dict.items():
+            if found_sub and found_eval:
+                break
+
+            # 宽松匹配 Sheet 名
+            is_summary_sheet = any(
+                k in name
+                for k in [
+                    "汇总",
+                    "合计",
+                    "结果",
+                    "评估",
+                    "认同",
+                    "统计",
+                    "分值",
+                    "Sheet1",
+                    "录入",
+                ]
+            )
+            if is_summary_sheet:
+                RuntimeLogger.log(f"正在扫描潜力工作表: {name} ...")
+                # 遍历前100行找“送审人天”等关键字
+                for r in range(min(100, len(df))):
+                    if found_sub and found_eval:
+                        break
+
+                    row_vals = [str(x) for x in df.iloc[r].values]
+                    for idx, val in enumerate(row_vals):
+                        if not val or val == "nan":
+                            continue
+                        clean_v = (
+                            val.replace(" ", "").replace("\n", "").replace("\r", "")
+                        )
+
+                        target_key = None
+                        if (
+                            any(
+                                k in clean_v
+                                for k in [
+                                    "送审人天",
+                                    "送审工作量",
+                                    "送审自评",
+                                    "项目送审",
+                                ]
+                            )
+                            and not found_sub
+                        ):
+                            target_key = "submission_days"
+                        elif (
+                            any(
+                                k in clean_v
+                                for k in [
+                                    "核定人天",
+                                    "核定工作量",
+                                    "评估工作量",
+                                    "评估人天",
+                                    "评定工作量",
+                                    "评定结果",
+                                    "评估结果",
+                                ]
+                            )
+                            and not found_eval
+                        ):
+                            target_key = "eval_days"
+
+                        if target_key:
+                            # 尝试从右侧提取
+                            val_found = None
+                            try:
+                                # 扫描右侧 6 个单元格
+                                for offset in range(1, 7):
+                                    if idx + offset >= len(df.columns):
+                                        break
+                                    candidate = str(df.iloc[r, idx + offset]).strip()
+                                    if not candidate or candidate == "nan":
+                                        continue
+                                    # 提取数字 (允许带千分位)
+                                    clean_cand = candidate.replace(",", "")
+                                    num_match = re.search(r"(\d+(\.\d+)?)", clean_cand)
+                                    if num_match:
+                                        cur_val = float(num_match.group(1))
+                                        if cur_val > 0:
+                                            val_found = f"{cur_val:.2f}"
+                                            break
+                            except:
+                                pass
+
+                            # 如果右侧没找到有力数值，看看当前单元格
+                            if not val_found:
+                                # 尝试从当前单元格正则提取 (如 "送审工作量：123.45")
+                                m = re.search(
+                                    r"[:：]\s*(\d+(?:\.\d+)?)", clean_v
+                                ) or re.search(r"(\d+(?:\.\d+)?)", clean_v)
+                                if m and float(m.group(1)) > 0:
+                                    val_found = f"{float(m.group(1)):.2f}"
+
+                            if val_found:
+                                report_results[target_key] = val_found
+                                if target_key == "submission_days":
+                                    found_sub = True
+                                else:
+                                    found_eval = True
+                                RuntimeLogger.log(
+                                    f"-> 在 [{name}] 表中找到 {target_key}: {val_found}"
+                                )
+                                break
+
+        # 1.5 如果汇总没找齐，尝试暴力扫描所有 sheet！
+        if not found_sub or not found_eval:
+            RuntimeLogger.log(
+                "汇总表中未找齐数值，开始全局扫描所有工作表...", "warning"
+            )
+            for name, df in df_dict.items():
+                if found_sub and found_eval:
+                    break
+                for r in range(min(100, len(df))):
+                    if found_sub and found_eval:
+                        break
+                    row_vals = [str(x) for x in df.iloc[r].values]
+                    for idx, val in enumerate(row_vals):
+                        clean_v = (
+                            val.replace(" ", "").replace("\n", "").replace("\r", "")
+                        )
+                        tk = None
+                        if not found_sub and any(
+                            k in clean_v for k in ["送审人天", "送审工作量"]
+                        ):
+                            tk = "submission_days"
+                        elif not found_eval and any(
+                            k in clean_v
+                            for k in ["核定人天", "评估工作量", "评定工作量"]
+                        ):
+                            tk = "eval_days"
+
+                        if tk:
+                            for offset in range(1, 4):
+                                if idx + offset >= len(df.columns):
+                                    break
+                                cand = str(df.iloc[r, idx + offset])
+                                m = re.search(r"(\d+(\.\d+)?)", cand)
+                                if m and float(m.group(1)) > 0:
+                                    report_results[tk] = f"{float(m.group(1)):.2f}"
+                                    if tk == "submission_days":
+                                        found_sub = True
+                                    else:
+                                        found_eval = True
+                                    break
+
+        # 2. 寻找功能点拆分表进行明细统计
         target_df = None
         for name, df in df_dict.items():
-            if "功能点拆分表" in name:
-                target_df = df
-                break
+            if any(k in name for k in ["功能点", "拆分", "清单", "明细"]):
+                # 排除掉太小的 sheet
+                if len(df.columns) > 5 and len(df) > 5:
+                    target_df = df
+                    RuntimeLogger.log(f"锁定功能点数据表: {name}")
+                    break
 
         if target_df is None:
-            target_df = list(df_dict.values())[0]
-
-        # 1. 查找“复用度”列索引
-        type_col = -1
-        start_data_idx = 0
-        for i in range(min(15, len(target_df))):
-            row = target_df.iloc[i].values
-            for idx, val in enumerate(row):
-                if isinstance(val, str) and "复用度" in val:
-                    type_col = idx
-                    start_data_idx = i + 1
-                    break
-            if type_col != -1:
+            # 兜底：查找列数较多的表，或者是任何不叫“认同”或“结论”的表
+            for name, df in df_dict.items():
+                if "结论" in name or "认同" in name:
+                    continue
+                target_df = df
+                RuntimeLogger.log(f"未能确定拆分表，尝试从 [{name}] sheet 提取")
                 break
 
-        if type_col == -1:
-            type_col = 11  # 默认 L 列
+        if target_df is not None and not target_df.empty:
+            # 查找“复用度”列
+            type_col = -1
+            start_data_idx = 0
 
-        # 2. 统计逻辑：严格统计行数
-        new_count = 0
-        reuse_count = 0
-        legacy_count = 0
+            # 安全检查：确保 target_df 确实可以进行 len() 操作且不为空
+            try:
+                max_rows = min(100, len(target_df))  # 扩大扫描范围
+            except:
+                max_rows = 0
 
-        for idx in range(start_data_idx, len(target_df)):
-            row = target_df.iloc[idx]
-            val = str(row.iloc[type_col]) if type_col < len(row) else ""
-            clean_val = val.strip()
-            if "新增" in clean_val:
-                new_count += 1
-            elif "复用" in clean_val or "优化" in clean_val:
-                reuse_count += 1
-            elif "利旧" in clean_val:
-                legacy_count += 1
+            for i in range(max_rows):
+                row = target_df.iloc[i].values
+                for idx, val in enumerate(row):
+                    if isinstance(val, str) and any(
+                        k in val for k in ["复用度", "开发类型", "类型", "模式"]
+                    ):
+                        # 进一步确认这一列下方是否包含“新增”等关键字
+                        found_kw = False
+                        try:
+                            # 确保不越界
+                            scan_end = min(i + 10, len(target_df))
+                            for next_r in range(i + 1, scan_end):
+                                cell_v = str(target_df.iloc[next_r, idx])
+                                if any(k in cell_v for k in ["新增", "复用", "利旧"]):
+                                    found_kw = True
+                                    break
+                        except:
+                            pass
 
-        total_fp = new_count + reuse_count + legacy_count
+                        if found_kw:
+                            type_col = idx
+                            start_data_idx = i + 1
+                            break
+                if type_col != -1:
+                    break
 
-        def safe_ratio(part, total):
-            if total == 0:
-                return "0.0%"
-            return f"{(part / total):.1%}"
+            if type_col != -1:
+                new_count = 0
+                reuse_count = 0
+                legacy_count = 0
 
-        return {
-            "total_fp": total_fp,
-            "new_fp": new_count,
-            "reuse_fp": reuse_count,
-            "legacy_fp": legacy_count,
-            "new_ratio": safe_ratio(new_count, total_fp),
-            "reuse_ratio": safe_ratio(reuse_count, total_fp),
-            "legacy_ratio": safe_ratio(legacy_count, total_fp),
-            "total_ratio": "100.0%",  # 合计占比始终是100%
-        }
+                # 统计各类型数量
+                for idx in range(start_data_idx, len(target_df)):
+                    row = target_df.iloc[idx]
+                    val = str(row.iloc[type_col]) if type_col < len(row) else ""
+                    clean_val = val.strip()
+                    if (
+                        not clean_val
+                        or "nan" in clean_val.lower()
+                        or "合计" in clean_val
+                    ):
+                        continue
+
+                    if any(k in clean_val for k in ["新增", "增加"]):
+                        new_count += 1
+                    elif any(k in clean_val for k in ["复用", "优化", "修改", "变更"]):
+                        reuse_count += 1
+                    elif any(k in clean_val for k in ["利旧", "原有", "保留"]):
+                        legacy_count += 1
+
+                total_fp = new_count + reuse_count + legacy_count
+
+                # 【优化】如果明细统计还是 0，尝试查找是否有“功能点数”列直接求和
+                if total_fp == 0:
+                    fp_val_col = -1
+                    for idx, val in enumerate(
+                        target_df.iloc[start_data_idx - 1].values
+                    ):
+                        if isinstance(val, str) and (
+                            "功能点数" in val or "FP" in val.upper()
+                        ):
+                            fp_val_col = idx
+                            break
+                    if fp_val_col != -1:
+                        try:
+                            # 简单求和
+                            col_vals = pd.to_numeric(
+                                target_df.iloc[start_data_idx:, fp_val_col],
+                                errors="coerce",
+                            ).fillna(0)
+                            total_fp = int(col_vals.sum())
+                            # 既然分不出类型，就全部归入“新增”或者按 0 处理
+                            # 这里保持 0 报警可能更好，或者至少 log 一下
+                            RuntimeLogger.log(
+                                f"明细复用度统计失败，但从功能点数列提取到总计: {total_fp}",
+                                "warning",
+                            )
+                        except:
+                            pass
+
+                if total_fp > 0:
+                    report_results.update(
+                        {
+                            "total_fp": total_fp,
+                            "new_fp": new_count,
+                            "reuse_fp": reuse_count,
+                            "legacy_fp": legacy_count,
+                            "new_ratio": (
+                                f"{(new_count / total_fp):.1%}"
+                                if total_fp > 0
+                                else "0.0%"
+                            ),
+                            "reuse_ratio": (
+                                f"{(reuse_count / total_fp):.1%}"
+                                if total_fp > 0
+                                else "0.0%"
+                            ),
+                            "legacy_ratio": (
+                                f"{(legacy_count / total_fp):.1%}"
+                                if total_fp > 0
+                                else "0.0%"
+                            ),
+                        }
+                    )
+                    RuntimeLogger.log(
+                        f"解析到功能点: 总计 {total_fp} (新增 {new_count}, 复用 {reuse_count}, 利旧 {legacy_count})"
+                    )
+            else:
+                RuntimeLogger.log("未在拆分表中找到'复用度'或'开发类型'列", "warning")
+
+        # 3. 兜底逻辑：如果全表统计下来发现功能点依然是 0，则在所有 sheet 中暴力搜索含有 "功能点" 关键字的数值单元格
+        if report_results.get("total_fp", 0) == 0:
+            RuntimeLogger.log(
+                "常规统计 FP 失败，开始全表暴力搜索功能点总数...", "warning"
+            )
+            found_violence = False
+            for name, df in df_dict.items():
+                if found_violence:
+                    break
+                # 遍寻前 100 行
+                for r_idx in range(min(100, len(df))):
+                    if found_violence:
+                        break
+                    row = df.iloc[r_idx]
+                    for c_idx, val in enumerate(row):
+                        val_str = str(val).replace(" ", "")
+                        if "功能点" in val_str and any(
+                            k in val_str for k in ["总计", "合计", "数", "FP"]
+                        ):
+                            # 搜索该单元格右侧及下方
+                            for off_r in range(0, 2):
+                                if r_idx + off_r >= len(df):
+                                    break
+                                for off_c in range(1, 4):
+                                    if c_idx + off_c >= len(df.columns):
+                                        break
+                                    cand = str(
+                                        df.iloc[r_idx + off_r, c_idx + off_c]
+                                    ).replace(",", "")
+                                    try:
+                                        v = float(
+                                            re.search(r"(\d+(\.\d+)?)", cand).group(1)
+                                        )
+                                        if v > 1:  # 排除掉太小的干扰项
+                                            report_results["total_fp"] = int(v)
+                                            report_results["new_fp"] = int(v)
+                                            report_results["new_ratio"] = "100.0%"
+                                            RuntimeLogger.log(
+                                                f"-> 暴力搜索在 [{name}] 表 {r_idx+off_r+1}行{c_idx+off_c+1}列 锁定 FP: {v}"
+                                            )
+                                            found_violence = True
+                                            break
+                                    except:
+                                        pass
+                                if found_violence:
+                                    break
+                            if found_violence:
+                                break
+
+        return report_results
 
     @staticmethod
     def _parse_consent_form(path):
         """解析结论认同表并记录数值所在的单元格地址，以便生成公式"""
+        from utils.runtime_logger import RuntimeLogger
+
+        RuntimeLogger.log(f"解析结论认同表: {os.path.basename(path)}")
+
         results = {
             "submission_days": "0",
             "submission_addr": "$C$3",
@@ -449,36 +1213,447 @@ class ReceiptProcessor:
                                         else:
                                             # 处理文本形式的百分比
                                             results[attr] = str(val).strip()
+
+                                    RuntimeLogger.log(
+                                        f"找到 {key} -> {results[attr]} (位置: {results[addr_attr]})"
+                                    )
                                     break  # 找到一个关键词就跳出关键词循环
             wb.close()
+        except Exception as e:
+            RuntimeLogger.log(f"解析结论认同表出错: {str(e)}", "error")
+        return results
+
+    @staticmethod
+    def _disable_snap_to_grid(p):
+        """取消段落对齐到文档网格，解决微软雅黑中文间距过大的问题"""
+        try:
+            pPr = p._element.get_or_add_pPr()
+            snap = pPr.find(qn("w:snapToGrid"))
+            if snap is None:
+                snap = OxmlElement("w:snapToGrid")
+                pPr.append(snap)
+            snap.set(qn("w:val"), "0")
         except Exception:
             pass
-        return results
 
     @staticmethod
     def _fill_template(doc, context):
         """填充 Word 模板 (根据语义隔离精准匹配数据)"""
 
-        # 1. 准备数据包 (强制总数为整数)
-        try:
-            total_fp = int(float(context.get("total_fp", 0)))
-        except:
-            total_fp = context.get("total_fp", "0")
+        # 0. 强制使用微软雅黑 11 号字体
+        sample_font_name = "微软雅黑"
+        sample_font_size = Pt(11)  # 11号字体
+
+        # 1. 准备数据包
+        def format_days(val):
+            try:
+                f_val = float(str(val).replace(",", "").replace("人天", ""))
+                # 严格保留 2 位小数，不使用千分位
+                return f"{f_val:.2f}"
+            except:
+                return str(val)
+
+        def format_fp(val):
+            try:
+                # 功能点不使用千分位
+                f_val = float(str(val).replace(",", ""))
+                if f_val == int(f_val):
+                    return str(int(f_val))
+                return f"{f_val:.1f}"
+            except:
+                return str(val)
 
         data_bundle = {
-            "total_fp": str(total_fp),
-            "new_fp": str(context.get("new_fp", "0")),
+            "total_fp": format_fp(context.get("total_fp", 0)),
+            "new_fp": format_fp(context.get("new_fp", "0")),
             "new_ratio": str(context.get("new_ratio", "0%")),
-            "reuse_fp": str(context.get("reuse_fp", "0")),
+            "reuse_fp": format_fp(context.get("reuse_fp", "0")),
             "reuse_ratio": str(context.get("reuse_ratio", "0%")),
-            "legacy_fp": str(context.get("legacy_fp", "0")),
+            "legacy_fp": format_fp(context.get("legacy_fp", "0")),
             "legacy_ratio": str(context.get("legacy_ratio", "0%")),
-            "submission_days": str(context.get("submission_days", "0")),
-            "eval_days": str(context.get("eval_days", "0")),
+            "submission_days": format_days(context.get("submission_days", "0")),
+            "eval_days": format_days(context.get("eval_days", "0")),
             "reduction_ratio": str(context.get("reduction_ratio", "0%")),
         }
 
-        # 2. 普通文本替换 (全局兜底)
+        if context.get("is_merge"):
+            data_bundle.update(
+                {
+                    "total_submission_days": format_days(
+                        context.get("total_submission_days", "0")
+                    ),
+                    "total_eval_days": format_days(context.get("total_eval_days", "0")),
+                    "total_reduction_ratio": str(
+                        context.get("total_reduction_ratio", "0%")
+                    ),
+                }
+            )
+
+        # 2. 定位并处理 Section II (评估过程)
+        def handle_section_ii():
+            from utils.runtime_logger import RuntimeLogger
+
+            RuntimeLogger.log("[DEBUG] 开始执行 handle_section_ii()")
+
+            # 打印前 30 个段落的内容用于诊断
+            RuntimeLogger.log(f"[DEBUG] 文档总共有 {len(doc.paragraphs)} 个段落")
+            for i in range(min(30, len(doc.paragraphs))):
+                p_text = doc.paragraphs[i].text.strip()
+                if p_text:  # 只打印非空段落
+                    RuntimeLogger.log(
+                        f"[DEBUG] 段落[{i}]: '{p_text[:50]}'"
+                    )  # 只打印前50个字符
+
+            sec_ii_para = None
+            sec_iii_para = None
+
+            for i, p in enumerate(doc.paragraphs):
+                text = p.text.replace(" ", "")
+                # 兼容有无编号的两种格式
+                if "评估过程" in text and ("二、" in text or text == "评估过程"):
+                    sec_ii_para = i
+                    RuntimeLogger.log(f"[DEBUG] 找到'评估过程'在段落 {i}")
+                elif "审核结果" in text and ("三、" in text or text == "审核结果"):
+                    sec_iii_para = i
+                    RuntimeLogger.log(f"[DEBUG] 找到'审核结果'在段落 {i}")
+                    break
+
+            RuntimeLogger.log(
+                f"[DEBUG] 遍历完成: sec_ii_para={sec_ii_para}, sec_iii_para={sec_iii_para}"
+            )
+
+            if sec_ii_para is not None:
+                RuntimeLogger.log(f"[DEBUG] 开始处理第二节，sec_ii_para={sec_ii_para}")
+                # 寻找列表起始位置 "本项目送审分为"
+                list_start_idx = -1
+                for j in range(sec_ii_para + 1, len(doc.paragraphs)):
+                    if "本项目送审分为" in doc.paragraphs[j].text:
+                        list_start_idx = j
+                        RuntimeLogger.log(f"[DEBUG] 找到'本项目送审分为'在段落 {j}")
+                        break
+                    if sec_iii_para and j >= sec_iii_para:
+                        break
+
+                if list_start_idx != -1:
+                    RuntimeLogger.log(
+                        f"[DEBUG] list_start_idx={list_start_idx}, 开始处理子项目列表"
+                    )
+                    # 1. 记录并彻底清理原有占位内容 (标题句之后，三、之前)
+                    search_end_idx = (
+                        sec_iii_para if sec_iii_para else len(doc.paragraphs)
+                    )
+
+                    # 寻找结束位置：包含“评审原则”或到达三、审核结果
+                    real_end_idx = search_end_idx
+                    for k in range(list_start_idx + 1, search_end_idx):
+                        if "评审原则" in doc.paragraphs[k].text:
+                            real_end_idx = k
+                            break
+
+                    p_title = doc.paragraphs[list_start_idx]
+                    subs = context.get("sub_projects", [])
+                    sub_count = len(subs) if subs else 1
+
+                    # 强制设置段落间距和缩进的辅助函数
+                    def force_paragraph_format(p):
+                        pf = p.paragraph_format
+                        pf.space_before = Pt(0)
+                        pf.space_after = Pt(0)
+                        # 【恢复】使用单倍行距
+                        pf.line_spacing = None
+                        pf.line_spacing_rule = WD_LINE_SPACING.SINGLE
+                        pf.first_line_indent = Pt(22)  # 约两个中文字符缩进
+
+                        # [关键修复] 取消对齐到网格，解决中文字符被撑大的问题
+                        ReceiptProcessor._disable_snap_to_grid(p)
+
+                    # 使用阿拉伯数字
+                    p_title.text = ""
+                    force_paragraph_format(p_title)
+
+                    r_title = p_title.add_run(f"本项目送审分为{sub_count}个子项目：")
+
+                    # 应用字体
+                    r_title.font.name = sample_font_name
+                    r_title._element.rPr.rFonts.set(qn("w:eastAsia"), sample_font_name)
+                    if sample_font_size:
+                        r_title.font.size = sample_font_size
+
+                    # [关键修复] 设置在 _element 上，因为 p 对象是动态生成的
+                    p_title._element._processed_by_agent = True
+
+                    # 倒序删除标题句与评审原则之间的所有段落
+                    # [修复] 预先收集元素，避免索引失效
+                    paras_to_del = []
+                    for k in range(list_start_idx + 1, real_end_idx):
+                        paras_to_del.append(doc.paragraphs[k])
+
+                    for p in reversed(paras_to_del):
+                        p_el = p._element
+                        p_el.getparent().remove(p_el)
+
+                    # 重新计算插入位置 (标题句之后)
+                    # 由于我们删除了中间的所有段落，原本在 real_end_idx 的段落现在紧跟在 p_title 之后
+                    # 重新通过 XML 查找位置以确保准确
+                    insert_pos = -1
+                    for i, p in enumerate(doc.paragraphs):
+                        if p._element == p_title._element:
+                            insert_pos = i + 1
+                            break
+
+                    if insert_pos == -1:
+                        insert_pos = list_start_idx + 1
+
+                    subs = context.get("sub_projects", [])
+                    # 调试日志
+                    RuntimeLogger.log(f"[DEBUG] 从 context 获取到 {len(subs)} 个子项目")
+                    if subs:
+                        for i, s in enumerate(subs, 1):
+                            RuntimeLogger.log(
+                                f"[DEBUG]   子项目{i}: {s.get('sub_project_name', 'N/A')} - 送审{s.get('submission_fp', 0)}FP, {s.get('submission_days', 0)}人天"
+                            )
+                    else:
+                        RuntimeLogger.log("[DEBUG] sub_projects 为空，将使用单项目模式")
+
+                    # ... (其后保持 subs 逻辑)
+                    if not subs:
+                        # 单项目模式
+                        sub_name = context.get("sub_project_name", "子项目")
+                        if not sub_name or sub_name == "子项目":
+                            sub_name = context["project_name"]
+
+                        subs = [
+                            {
+                                "sub_project_name": sub_name,
+                                "submission_fp": context.get("total_fp", "0"),
+                                "submission_days": context.get("submission_days", "0"),
+                                "new_fp": context.get("new_fp", "0"),
+                                "new_ratio": context.get("new_ratio", "0%"),
+                                "reuse_fp": context.get("reuse_fp", "0"),
+                                "reuse_ratio": context.get("reuse_ratio", "0%"),
+                                "legacy_fp": context.get("legacy_fp", "0"),
+                                "legacy_ratio": context.get("legacy_ratio", "0%"),
+                                "eval_days": context.get("eval_days", "0"),
+                            }
+                        ]
+
+                    for idx, sub in enumerate(subs, 1):
+                        # Line 1: 1、项目名称：送审xxx功能点，送审工作量自评为xxx人天。
+                        p1 = doc.paragraphs[insert_pos].insert_paragraph_before()
+                        force_paragraph_format(p1)
+
+                        # 重要：送审总功能点评定 = 新增 + 复用 + 利旧
+                        try:
+                            calc_total_fp = (
+                                int(float(str(sub.get("new_fp", 0)).replace(",", "")))
+                                + int(
+                                    float(str(sub.get("reuse_fp", 0)).replace(",", ""))
+                                )
+                                + int(
+                                    float(str(sub.get("legacy_fp", 0)).replace(",", ""))
+                                )
+                            )
+                        except:
+                            calc_total_fp = sub.get("submission_fp", 0)
+
+                        # 恢复无空格格式
+                        r_text = f"{idx}、{sub['sub_project_name']}：送审{format_fp(calc_total_fp)}功能点，送审工作量自评为{format_days(sub['submission_days'])}人天。"
+                        r1 = p1.add_run(r_text)
+
+                        # 应用字体
+                        r1.font.name = sample_font_name
+                        r1._element.rPr.rFonts.set(qn("w:eastAsia"), sample_font_name)
+                        if sample_font_size:
+                            target_size = sample_font_size
+                            if not isinstance(target_size, int) and hasattr(
+                                target_size, "pt"
+                            ):
+                                # 如果是 Length 对象，保持原样
+                                pass
+                            r1.font.size = target_size
+
+                        p1._element._processed_by_agent = True
+                        insert_pos += 1
+
+                        # Line 2: 评估结果：新增功能点 2364 个，占比 100.0%；复用功能点 0 个，占比 0.0%；利旧功能点 0 个，占比 0.0%，评定工作量 214.91 人天。
+                        p2 = doc.paragraphs[insert_pos].insert_paragraph_before()
+                        force_paragraph_format(p2)
+
+                        r_label = p2.add_run("评估结果：")
+                        r_label.bold = True
+
+                        # 准备数据，确保百分比不重复 %
+                        r_new = str(sub.get("new_ratio", "0%")).replace("%", "") + "%"
+                        r_reuse = (
+                            str(sub.get("reuse_ratio", "0%")).replace("%", "") + "%"
+                        )
+                        r_legacy = (
+                            str(sub.get("legacy_ratio", "0%")).replace("%", "") + "%"
+                        )
+
+                        # 恢复无空格格式，分号/逗号严格遵循模板
+                        text2 = f"新增功能点{format_fp(sub['new_fp'])}个，占比{r_new}；复用功能点{format_fp(sub['reuse_fp'])}个，占比{r_reuse}；利旧功能点{format_fp(sub['legacy_fp'])}个，占比{r_legacy}，评定工作量{format_days(sub['eval_days'])}人天。"
+                        r_val = p2.add_run(text2)
+
+                        # 应用字体
+                        for r in [r_label, r_val]:
+                            r.font.name = sample_font_name
+                            r._element.rPr.rFonts.set(
+                                qn("w:eastAsia"), sample_font_name
+                            )
+                            if sample_font_size:
+                                target_size = sample_font_size
+                                if not isinstance(target_size, int) and hasattr(
+                                    target_size, "pt"
+                                ):
+                                    pass
+                                r.font.size = target_size
+
+                        p2._element._processed_by_agent = True
+                        insert_pos += 1
+
+                    # 清除结束 (旧的 delete_targets 逻辑已上移至插入前)
+                    pass
+                    pass
+
+        def handle_section_iii_table():
+            """处理第三节的项目明细表：如果有多子项目则增加行"""
+            if not context.get("is_merge") or not context.get("sub_projects"):
+                return
+
+            # 寻找第三节下方的第一个表格
+            sec_iii_idx = -1
+            for i, p in enumerate(doc.paragraphs):
+                if "三、审核结果" in p.text.replace(" ", ""):
+                    sec_iii_idx = i
+                    break
+
+            if sec_iii_idx == -1:
+                return
+
+            # 在三、审核结果之后的第一个表格
+            target_table = None
+            for table in doc.tables:
+                # 检查表格是否在三、审核结果之后
+                # (doc.tables 不存储段落索引，我们需要通过 _element 查找)
+                if table._element.getparent().index(table._element) > doc.paragraphs[
+                    sec_iii_idx
+                ]._element.getparent().index(doc.paragraphs[sec_iii_idx]._element):
+                    target_table = table
+                    break
+
+            if not target_table:
+                return
+
+            sub_projects = context["sub_projects"]
+            if len(sub_projects) <= 1:
+                return
+
+            # 寻找包含“项目名称”且有高亮占位符的样板行
+            template_row_idx = -1
+            for i, row in enumerate(target_table.rows):
+                row_text = "".join(cell.text for cell in row.cells)
+                # 如果这一行有 X 或者 混合了项目名称标签，则认为是模板行
+                if (
+                    any(cell.text.strip() in ["X", "x"] for cell in row.cells)
+                    or "项目名称" in row_text
+                ):
+                    template_row_idx = i
+                    break
+
+            if template_row_idx == -1:
+                # 默认最后一行（排除合计行的情况，通常合计行会有“合计”字样）
+                template_row_idx = len(target_table.rows) - 1
+                for i in range(len(target_table.rows) - 1, -1, -1):
+                    if "合计" not in "".join(
+                        cell.text for cell in target_table.rows[i].cells
+                    ):
+                        template_row_idx = i
+                        break
+
+            # 保存模板行的格式
+            template_row = target_table.rows[template_row_idx]
+
+            # 为剩余的子项目增加行 (并填入内容)
+            for i in range(1, len(sub_projects)):
+                sub = sub_projects[i]
+                new_row = target_table.add_row()
+
+                # 准备该子项目的数据包
+                try:
+                    calc_total = (
+                        int(float(str(sub.get("new_fp", 0)).replace(",", "")))
+                        + int(float(str(sub.get("reuse_fp", 0)).replace(",", "")))
+                        + int(float(str(sub.get("legacy_fp", 0)).replace(",", "")))
+                    )
+                except:
+                    calc_total = sub.get("submission_fp", 0)
+
+                sub_bundle = {
+                    "total_fp": format_fp(calc_total),
+                    "new_fp": format_fp(sub.get("new_fp", 0)),
+                    "new_ratio": str(sub.get("new_ratio", "0%")),
+                    "reuse_fp": format_fp(sub.get("reuse_fp", 0)),
+                    "reuse_ratio": str(sub.get("reuse_ratio", "0%")),
+                    "legacy_fp": format_fp(sub.get("legacy_fp", 0)),
+                    "legacy_ratio": str(sub.get("legacy_ratio", "0%")),
+                    "submission_days": format_days(sub.get("submission_days", "0")),
+                    "eval_days": format_days(sub.get("eval_days", "0")),
+                }
+
+                for j, cell in enumerate(template_row.cells):
+                    # 复制文本内容
+                    cell_text = template_row.cells[j].text
+                    new_row.cells[j].text = cell_text
+
+                    # 应用该项目的数据
+                    if new_row.cells[j].paragraphs:
+                        p = new_row.cells[j].paragraphs[0]
+                        p.alignment = template_row.cells[j].paragraphs[0].alignment
+                        # 标记已处理，防止外层循环重复处理
+                        ReceiptProcessor._smart_replace_highlights(p, sub_bundle)
+                        ReceiptProcessor._disable_snap_to_grid(p)
+                        # [关键] 直接在 _element 上标记
+                        p._element._processed_by_agent = True
+
+            # 最后处理样板行本身 (使用第一个子项目的数据)
+            sub0 = sub_projects[0]
+            try:
+                calc_total0 = (
+                    int(float(str(sub0.get("new_fp", 0)).replace(",", "")))
+                    + int(float(str(sub0.get("reuse_fp", 0)).replace(",", "")))
+                    + int(float(str(sub0.get("legacy_fp", 0)).replace(",", "")))
+                )
+            except:
+                calc_total0 = sub0.get("submission_fp", 0)
+
+            sub0_bundle = {
+                "total_fp": format_fp(calc_total0),
+                "new_fp": format_fp(sub0.get("new_fp", 0)),
+                "new_ratio": str(sub0.get("new_ratio", "0%")),
+                "reuse_fp": format_fp(sub0.get("reuse_fp", 0)),
+                "reuse_ratio": str(sub0.get("reuse_ratio", "0%")),
+                "legacy_fp": format_fp(sub0.get("legacy_fp", 0)),
+                "legacy_ratio": str(sub0.get("legacy_ratio", "0%")),
+                "submission_days": format_days(sub0.get("submission_days", "0")),
+                "eval_days": format_days(sub0.get("eval_days", "0")),
+            }
+            for cell in template_row.cells:
+                if cell.paragraphs:
+                    p = cell.paragraphs[0]
+                    ReceiptProcessor._smart_replace_highlights(p, sub0_bundle)
+                    ReceiptProcessor._disable_snap_to_grid(p)
+                    # [关键] 直接在 _element 上标记
+                    p._element._processed_by_agent = True
+
+        handle_section_ii()
+        handle_section_iii_table()
+
+        # 2.5 调试：检查标记是否有效
+        # marked_count = sum(1 for p in doc.paragraphs if hasattr(p._element, "_processed_by_agent") and p._element._processed_by_agent)
+        # print(f"DEBUG: {marked_count} 个段落已标记为 _processed_by_agent")
+
+        # 3. 准备 Section III (审核结果) 基础替换词
         reduction_val = context.get("reduction_ratio", "0%")
 
         # 处理送审时间 (从 yyyy-MM-dd 转为 中文年月日)
@@ -499,7 +1674,13 @@ class ReceiptProcessor:
             "2026 年 x 月 x 日": cn_date,
             "2026年x月x日": cn_date,
             "2026年X月X日": cn_date,
-            "XXX人天": context["eval_days"],
+            "XXX人天": data_bundle["eval_days"],
+            "xxxx人天": data_bundle["eval_days"],
+            "xxxx 人天": data_bundle["eval_days"],
+            "xxxxxxxx人天": data_bundle["submission_days"],
+            "xxxxxxxx 人天": data_bundle["submission_days"],
+            "xxxx功能点": data_bundle["total_fp"],
+            "xxxx 功能点": data_bundle["total_fp"],
             "xx.xx%": reduction_val,
             "XXXXX%": reduction_val,
             "XXXX%": reduction_val,
@@ -554,7 +1735,14 @@ class ReceiptProcessor:
 
         # 定义一个统一的处理器
         def process_paragraph(p, extra_context=""):
-            if hasattr(p, "_processed_by_agent"):
+            # [关键修复] 取消对齐到网格，解决中文字符被撑大的问题
+            ReceiptProcessor._disable_snap_to_grid(p)
+
+            # [关键修复] 使用 _element 判断，因为 Paragraph 对象是动态创建的
+            if (
+                hasattr(p._element, "_processed_by_agent")
+                and p._element._processed_by_agent
+            ):
                 return
 
             # A. 处理高亮色块
@@ -614,12 +1802,16 @@ class ReceiptProcessor:
                             pass
 
                 # 标记已处理并退出，避免后续 X 替换和标签追加再次处理
-                p._processed_by_agent = True
+                p._element._processed_by_agent = True
                 return
 
             # C. 统一占位符替换 (使用正则处理所有 X/x 连缀)
-            # 优化正则：排除后面紧跟 % 的情况，避免误杀比例
-            x_pattern = re.compile(r"[Xx]+(?:[.,、\s]*[Xx]+)*(?:\.\d+)?(?:\d+)?(?![%])")
+            # 优化正则：匹配独立的 X 或 多个 X 连缀，且不影响其它英文单词（如Excel）
+            # 排除后面紧跟 % 的情况，避免误杀比例
+            # 使用负回顾断言 (?<![a-zA-Z]) 替代变长回顾断言 (?<=^|[^a-zA-Z]) 以适配 Python re
+            x_pattern = re.compile(
+                r"(?i)(?<![a-zA-Z])[Xx]{1,}(?=[^a-zA-Z%]|$)|(?i)[Xx]{2,}"
+            )
 
             p_text = p.text
             # 检查是否包含 x 或 X
@@ -631,9 +1823,18 @@ class ReceiptProcessor:
                         sample_run = r
                         break
 
-                # 执行正则替换：将所有的 X 连缀块替换为项目名称
+                # 执行正则替换：根据不同模式替换为项目名称
                 def replace_x_pattern(match):
-                    return context["project_name"]
+                    # 【优化】智能处理：避免出现“项目项目”连读
+                    proj_name = context["project_name"]
+                    p_full_text = p.text
+                    match_end = match.end()
+
+                    # 检查占位符后面是否紧跟“项目”二字
+                    after_text = p_full_text[match_end:].strip()
+                    if after_text.startswith("项目") and proj_name.endswith("项目"):
+                        return proj_name[:-2]  # 返回去掉“项目”后缀的名称
+                    return proj_name
 
                 new_text = x_pattern.sub(replace_x_pattern, p_text)
 
@@ -727,10 +1928,10 @@ class ReceiptProcessor:
                                     )
                                 except:
                                     pass
-                        p._processed_by_agent = True
+                        p._element._processed_by_agent = True
                         return
 
-            p._processed_by_agent = True
+            p._element._processed_by_agent = True
 
         # 3. 遍历所有段落
         for p in doc.paragraphs:
@@ -744,11 +1945,57 @@ class ReceiptProcessor:
                 for cell in table.rows[0].cells:
                     headers.append(cell.text.strip())
 
-            for row in table.rows:
+            # 【优化】如果当前表看起来像是明细表，且有多个子项目
+            is_detail_table = False
+            if context.get("is_merge") and context.get("sub_projects"):
+                row_contents = ["".join(c.text for c in r.cells) for r in table.rows]
+                if any("项目名称" in rc for rc in row_contents) or any(
+                    "送审工作量" in rc for rc in row_contents
+                ):
+                    is_detail_table = True
+
+            sub_idx = 0
+            for row_idx, row in enumerate(table.rows):
+                # 确定当前行应该使用哪个数据环境
+                row_bundle = data_bundle
+                if is_detail_table:
+                    # 如果不是表头行且不是合计行
+                    row_text = "".join(cell.text for cell in row.cells)
+                    if row_idx > 0 and "合计" not in row_text:
+                        subs = context.get("sub_projects", [])
+                        if sub_idx < len(subs):
+                            sub = subs[sub_idx]
+                            # 构建特定行的 bundle
+                            row_bundle = {
+                                "new_fp": sub.get("new_fp", 0),
+                                "new_ratio": sub.get("new_ratio", "0%"),
+                                "reuse_fp": sub.get("reuse_fp", 0),
+                                "reuse_ratio": sub.get("reuse_ratio", "0%"),
+                                "legacy_fp": sub.get("legacy_fp", 0),
+                                "legacy_ratio": sub.get("legacy_ratio", "0%"),
+                                "submission_days": sub.get("submission_days", "0"),
+                                "eval_days": sub.get("eval_days", "0"),
+                                "total_fp": sub.get("submission_fp", 0),
+                            }
+                            # 增加对单元格内项目名称的单独处理
+                            for cell in row.cells:
+                                if any(x in cell.text for x in ["X", "x", "子项目"]):
+                                    # 针对项目名称格，尝试直接填充
+                                    if (
+                                        "名称" in headers[row.cells.index(cell)]
+                                        or "子项目" in headers[row.cells.index(cell)]
+                                    ):
+                                        cell.text = sub["sub_project_name"]
+                            sub_idx += 1
+
                 for idx, cell in enumerate(row.cells):
                     # 获取列上下文 (表头)
                     col_header = headers[idx] if idx < len(headers) else ""
                     for p in cell.paragraphs:
+                        # 使用当前行的 bundle
+                        ReceiptProcessor._smart_replace_highlights(
+                            p, row_bundle, col_header
+                        )
                         process_paragraph(p, col_header)
 
     @staticmethod

@@ -36,6 +36,7 @@ from PySide6.QtGui import (
 from ui.task_card import TaskCard
 from utils.document_processor import DocumentProcessor
 from utils.similarity_checker import SimilarityChecker
+from utils.archive_utils import ArchiveUtils  # ✅ 导入压缩包处理工具
 from utils.styles import apply_dark_title_bar
 from utils.path_utils import get_resource_path
 
@@ -258,7 +259,7 @@ class UploadAreaWidget(QFrame):
         layout.addWidget(main_text)
 
         # 提示文本
-        hint_text = QLabel("支持 .docx 和 .xlsx 自动配对")
+        hint_text = QLabel("支持 .docx、.xlsx 及 .zip 自动配对")
         hint_text.setProperty("class", "task-meta")
         hint_text.setStyleSheet("font-size: 11px;")
         hint_text.setAlignment(Qt.AlignCenter)
@@ -291,6 +292,58 @@ class UploadAreaWidget(QFrame):
             self.files_dropped.emit(files)
 
 
+class DragOverlay(QFrame):
+    """拖拽覆盖层"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        # 允许点击穿透，但不拦截拖拽
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+
+        # 模拟图2效果
+        self.container = QFrame()
+        self.container.setStyleSheet(
+            "background: rgba(0, 0, 0, 120); border-radius: 20px;"
+        )
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(40, 40, 40, 40)
+        container_layout.setSpacing(20)
+
+        # 图标 (模拟图2中的文档图标)
+        icon_label = QLabel("📄")
+        icon_label.setStyleSheet("font-size: 64px; color: white;")
+        icon_label.setAlignment(Qt.AlignCenter)
+        container_layout.addWidget(icon_label)
+
+        # 主文字
+        self.text_label = QLabel("文件拖动到此处即可上传")
+        self.text_label.setStyleSheet(
+            "font-size: 20px; font-weight: bold; color: white;"
+        )
+        self.text_label.setAlignment(Qt.AlignCenter)
+        container_layout.addWidget(self.text_label)
+
+        # 副文字
+        hint_label = QLabel("支持 Word、Excel 及 压缩包")
+        hint_label.setStyleSheet("font-size: 14px; color: #cbd5e1;")
+        hint_label.setAlignment(Qt.AlignCenter)
+        container_layout.addWidget(hint_label)
+
+        layout.addWidget(self.container)
+
+        # 整体背景模糊透明效果 (使用 semi-transparent dark)
+        self.setStyleSheet("background: rgba(15, 23, 42, 160);")
+
+    def show_overlay(self):
+        self.setGeometry(0, 0, self.parent().width(), self.parent().height())
+        self.raise_()
+        self.show()
+
+
 class UploadDialog(QDialog):
     task_submitted = Signal(dict)  # ✅ 新增信号
     """上传任务弹窗 - 新UI外观 + 完整功能"""
@@ -300,6 +353,7 @@ class UploadDialog(QDialog):
         self.setWindowTitle("新建审核任务")
         self.setWindowIcon(QIcon(get_resource_path("ui/logo.png")))
         self.setMinimumSize(900, 800)
+        self.setAcceptDrops(True)  # 支持全局拖拽
 
         # 应用原生标题栏深色模式
         from PySide6.QtWidgets import QApplication
@@ -311,6 +365,9 @@ class UploadDialog(QDialog):
 
         self.file_queue = {}
         self.excel_info = {}  # 存储Excel文件信息
+
+        # 初始化拖拽覆盖层
+        self.drag_overlay = DragOverlay(self)
 
         # 主布局
         main_layout = QVBoxLayout(self)
@@ -361,6 +418,24 @@ class UploadDialog(QDialog):
         # ========== 7. 底部按钮 ==========
         footer = self._create_footer()
         main_layout.addWidget(footer)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        """支持全局拖拽进入"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.drag_overlay.show_overlay()
+
+    def dragLeaveEvent(self, event):
+        """拖拽离开"""
+        self.drag_overlay.hide()
+
+    def dropEvent(self, event: QDropEvent):
+        """支持全局拖拽放下"""
+        self.drag_overlay.hide()
+        if event.mimeData().hasUrls():
+            files = [url.toLocalFile() for url in event.mimeData().urls()]
+            self.handle_files(files)
+            event.acceptProposedAction()
 
     def _create_config_section(self):
         """创建配置区域（人天 + 并发数）"""
@@ -808,7 +883,18 @@ class UploadDialog(QDialog):
             print("=" * 50)
             print("开始处理文件:")
 
-            for file_path in files:
+            # 新增：预处理压缩包，将其内部文件展开到待处理列表中
+            expanded_files = []
+            for f in files:
+                if ArchiveUtils.is_archive(f):
+                    print(f"检测到压缩包: {os.path.basename(f)}，正在解压...")
+                    extracted = ArchiveUtils.extract_archive(f)
+                    expanded_files.extend(extracted)
+                else:
+                    expanded_files.append(f)
+
+            # 使用展开后的文件列表进行后续处理
+            for file_path in expanded_files:
                 filename = os.path.basename(file_path)
                 base_name = os.path.splitext(filename)[0]
                 ext = os.path.splitext(filename)[1].lower()
@@ -843,23 +929,32 @@ class UploadDialog(QDialog):
                 else:
                     print(f"匹配到现有条目: {target_key}")
 
-                # 修改这里：同时支持 .doc 和 .docx
-                if ext == ".doc" or ext == ".docx":
-                    print("-> 标记为 Word 文件")
+                # 排除需求清单
+                if "需求清单" in filename:
+                    print(f"-> 跳过需求清单: {filename}")
+                    continue
+
+                # 修改这里：根据关键字识别文件类型
+                if (ext == ".doc" or ext == ".docx") and "说明书" in filename:
+                    print("-> 标记为 需求说明书")
                     self.file_queue[target_key]["has_word"] = True
                     self.file_queue[target_key]["original_names"]["word"] = filename
                     self.file_queue[target_key]["file_paths"]["word"] = file_path
-                elif ext == ".xlsx":
-                    print("-> 标记为 Excel 文件")
+                elif ext == ".xlsx" and "拆分表" in filename:
+                    print("-> 标记为 拆分表")
                     self.file_queue[target_key]["has_excel"] = True
                     self.file_queue[target_key]["original_names"]["excel"] = filename
                     self.file_queue[target_key]["file_paths"]["excel"] = file_path
                     # 解析Excel文件信息
                     self.parse_excel_file(target_key, file_path)
+                else:
+                    print(f"-> 忽略不符合条件的文件: {filename}")
 
             print("\n当前文件队列:")
             for key, value in self.file_queue.items():
-                print(f"  '{key}': Word={value['has_word']}, Excel={value['has_excel']}")
+                print(
+                    f"  '{key}': Word={value['has_word']}, Excel={value['has_excel']}"
+                )
             print("=" * 50)
 
             # 当有Excel文件被添加时，更新下拉框选项
@@ -870,6 +965,7 @@ class UploadDialog(QDialog):
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
             import traceback
+
             error_msg = f"处理文件时发生意外错误:\n{str(e)}\n\n{traceback.format_exc()}"
             print(error_msg)
             QMessageBox.critical(self, "错误", error_msg)
@@ -1538,15 +1634,16 @@ class UploadDialog(QDialog):
             QMessageBox.warning(
                 self, "警告", "必须输入【线上送审人天】才能进行第2步计算！"
             )
+            # 适配深色模式错误样式
             self.days_input.setStyleSheet(
                 """
                 QLineEdit {
                     padding: 8px 12px;
-                    border: 3px solid #ef4444;
-                    border-radius: 6px;
-                    font-size: 12px;
-                    background: palette(window);
-                    color: #ef4444;
+                    border: 2px solid #ef4444;
+                    border-radius: 8px;
+                    font-size: 13px;
+                    background-color: #450a0a;
+                    color: #fca5a5;
                 }
             """
             )

@@ -133,12 +133,19 @@ class HierarchicalMatcher:
         self.fuzzy_match = fuzzy_match
         self.threshold = threshold
 
-    def _open_word_doc(self, word_file: str):
+    def _open_word_doc(self, word_file_or_doc):
         """
         统一打开 Word 文档的方法，处理 .doc 转换、兼容性修复。
-        返回 docx.Document 对象。
+        支持传入已加载的 docx.Document 对象。
         """
-        original_word_file = Path(word_file)
+        if (
+            not isinstance(word_file_or_doc, (str, Path))
+            and word_file_or_doc is not None
+        ):
+            # 假定已经是 docx.Document 对象
+            return word_file_or_doc, "PRELOADED_DOCX", False
+
+        original_word_file = Path(word_file_or_doc)
         processed_word_file = original_word_file
         temp_docx_created = False
         doc = None
@@ -180,7 +187,7 @@ class HierarchicalMatcher:
 
                     doc = Document(temp_compat_path)
                 finally:
-                    if temp_compat_path and os.exists(temp_compat_path):
+                    if temp_compat_path and os.path.exists(temp_compat_path):
                         try:
                             os.unlink(temp_compat_path)
                         except:
@@ -222,8 +229,16 @@ class HierarchicalMatcher:
             if mode == "flat":
                 return self._extract_word_flat(doc, progress_callback, full_text_search)
             else:
+                # 兼容原有 word_file 传递逻辑
+                if str(processed_path) == "PRELOADED_DOCX":
+                    # 如果是预加载的，word_file 实际上没法通过 doc 获取路径，
+                    # 除非 doc 对象带了路径。这里我们还是希望调用者传 word_file 为原路径
+                    pass
+
                 return self._extract_word_hierarchical(
-                    doc, progress_callback, word_file=processed_path
+                    doc,
+                    progress_callback,
+                    word_file=word_file if isinstance(word_file, (str, Path)) else None,
                 )
         finally:
             if is_temp and Path(processed_path).exists():
@@ -424,15 +439,19 @@ class HierarchicalMatcher:
         """
         hierarchy = {"level1": [], "level2": [], "level3": []}
 
-        if not word_file:
-            print("  [!] 警告: 未提供源文件路径，无法使用智能提取引擎")
+        # 优先使用已打开的 doc 对象，如果没有则尝试 word_file 路径
+        target_to_extract = doc if doc is not None else word_file
+
+        if not target_to_extract:
+            print("  [!] 警告: 未提供文档对象或路径，无法使用智能提取引擎")
             return hierarchy
 
         try:
             from utils.document_processor import DocumentProcessor
 
             # 获取已经过 DocumentProcessor（模拟 WPS 智能目录）识别处理后的完整结构
-            sections = DocumentProcessor.extract_word_structure(word_file)
+            # DocumentProcessor.extract_word_structure 已支持传入路径或 doc 对象
+            sections = DocumentProcessor.extract_word_structure(target_to_extract)
 
             if not sections:
                 print("  [!] 警告: 智能提取引擎未返回任何章节信息")
@@ -628,13 +647,20 @@ class HierarchicalMatcher:
         """提取层级 Excel 数据，支持每一层具体合并范围的检测"""
         data = []
 
-        # 预计算每一层级（L1, L2, L3）在每一行的具体范围
-        # 即使 L3 是最细粒度的，我们也需要知道这一行所属的 L1 到底跨越了哪些行
+        # [OPTIMIZATION] 增加范围缓存，避免对相同单元格的内容重复进行上下游扫描
+        range_cache = {}
 
         def get_range(row_idx, col_idx):
             val = str(df.iloc[row_idx, col_idx]).strip()
             if not val or val.lower() == "nan":
                 return f"{row_idx + header + 2}"
+
+            # 如果缓存命中，直接返回
+            cache_key = (col_idx, val, row_idx)
+            # 实际上由于顺序扫描，我们只需要判断当前行是否在已算出的某个范围内
+            # 但简单的 (col, val, row) -> result 缓存配合顺序特性效果最好
+            if cache_key in range_cache:
+                return range_cache[cache_key]
 
             # 向上找起点
             start = row_idx
@@ -663,7 +689,13 @@ class HierarchicalMatcher:
 
             s_num = start + header + 2
             e_num = end + header + 2
-            return f"{s_num}-{e_num}" if e_num > s_num else f"{s_num}"
+            res = f"{s_num}-{e_num}" if e_num > s_num else f"{s_num}"
+
+            # 将该范围内所有行都缓存该结果
+            for r in range(start, end + 1):
+                range_cache[(col_idx, val, r)] = res
+
+            return res
 
         for idx in range(len(df)):
             row_ffill = df.iloc[idx]
@@ -710,14 +742,19 @@ class HierarchicalMatcher:
         return data
 
     def _load_excel_with_merged(
-        self, excel_file: str, sheet_name=0, header=0
+        self, excel_file_or_df, sheet_name=0, header=0
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         加载 Excel 并处理合并单元格。
-        返回 (填充后的 DataFrame, 原始 DataFrame)。
+        支持传入已存在的 pd.DataFrame (作为 df_raw)。
         """
-        # 使用 pandas 读取
-        df_raw = pd.read_excel(excel_file, sheet_name=sheet_name, header=header)
+        if isinstance(excel_file_or_df, pd.DataFrame):
+            df_raw = excel_file_or_df
+        else:
+            # 使用 pandas 读取
+            df_raw = pd.read_excel(
+                excel_file_or_df, sheet_name=sheet_name, header=header
+            )
 
         # 预先清理：将所有 NaN 转换为 Python 的 None 或空字符串以便统一判断
         df_ffill = df_raw.copy()
@@ -975,18 +1012,53 @@ class HierarchicalMatcher:
         column: int = 0,
         full_text_search: bool = False,
         progress_callback=None,
+        word_items_preloaded=None,  # [NEW] 简单匹配预置数据
     ) -> Dict:
         """简单匹配模式（单列匹配）"""
 
         # 1. 统一提取 Word 内容
-        # 注意：simple 模式下的 full_text_search 暂不通过统一 API 处理特殊过滤，直接使用其原有逻辑
-        # 但我们为了对齐，可以使用统一 API 提取
-        word_items = self.extract_word_content(
-            word_file,
-            mode="flat",
-            progress_callback=progress_callback,
-            full_text_search=full_text_search,
-        )
+        if word_items_preloaded is not None:
+            # [FIX] 转换预加载的层级数据为扁平格式
+            word_items = []
+            for s in word_items_preloaded:
+                # 提取标题项
+                title_text = s.get("title", "")
+                if title_text:
+                    cleaned = self.basic_clean(title_text)
+                    word_items.append(
+                        {
+                            "original": title_text,
+                            "text": cleaned,
+                            "cleaned": cleaned,
+                            "in_toc": True,
+                            "level": s.get("level", 0),
+                        }
+                    )
+
+                # 如果开启了全文搜索，还需要提取内容项 (content 列表中的每一行)
+                if full_text_search:
+                    for line in s.get("content", []):
+                        if not line.strip():
+                            continue
+                        cleaned_line = self.basic_clean(line)
+                        if len(cleaned_line) < 2:
+                            continue
+                        word_items.append(
+                            {
+                                "original": line,
+                                "text": cleaned_line,
+                                "cleaned": cleaned_line,
+                                "in_toc": False,
+                                "level": "normal",
+                            }
+                        )
+        else:
+            word_items = self.extract_word_content(
+                word_file,
+                mode="flat",
+                progress_callback=progress_callback,
+                full_text_search=full_text_search,
+            )
 
         if progress_callback:
             progress_callback(30, "正在读取 Excel 数据...")
@@ -1025,25 +1097,16 @@ class HierarchicalMatcher:
         not_found_in_word = []
 
         total = len(excel_data)
-        # 提高进度更新频率，每一项都更新（如果数据量极大则每10项更新一次）
-        update_interval = 1 if total < 500 else 10
+        update_interval = max(1, total // 20)
+
+        import concurrent.futures
 
         for idx, excel_item in enumerate(excel_data):
-            if progress_callback:
-                if idx % update_interval == 0 or idx == total - 1:
-                    progress = 30 + int((idx / (total if total > 0 else 1)) * 60)
-                    progress_callback(progress, f"匹配中... {idx + 1}/{total}")
+            if progress_callback and (idx % update_interval == 0 or idx == total - 1):
+                progress = 30 + int((idx / (total if total > 0 else 1)) * 60)
+                progress_callback(progress, f"匹配中... {idx + 1}/{total}")
 
-            # ✅ 关键修复：对 Excel 原始数据也做基础清洗，用于匹配
             excel_text_for_matching = self.basic_clean(excel_item["original"])
-
-            # ====== 添加调试信息（仅前5条）======
-            if idx < 5:
-                print(f"\n【调试-匹配 {idx + 1}】")
-                print(f"  Excel原始: '{excel_item['original']}'")
-                print(f"  Excel清洗后用于匹配: '{excel_text_for_matching}'")
-            # ====== 调试信息结束 ======
-
             found, word_match, similarity_score = self.find_match(
                 excel_text_for_matching, word_items, 0
             )
@@ -1053,47 +1116,25 @@ class HierarchicalMatcher:
                 location = "目录" if is_in_toc else "正文"
 
                 match_data = {
-                    "Excel功能点": excel_item["original"],  # ✅ 显示原始文本
+                    "Excel功能点": excel_item["original"],
                     "Word匹配项": word_match.get(
                         "display", word_match.get("original", "")
                     ),
                     "位置": location,
-                    "相似度": f"{similarity_score:.2%}",  # ✅ 修复：去掉空格
+                    "相似度": f"{similarity_score:.2%}",
                 }
-
-                # ====== 添加调试信息（仅前5条）======
-                if idx < 5:
-                    print(f"  [OK] 找到匹配!")
-                    print(f"  Word display: '{word_match.get('display', '')}'")
-                    print(f"相似度: {similarity_score:.2%}")  # ✅ 修复：去掉空格
-                    print(
-                        f"  【关键】match_data['Excel功能点']: '{match_data['Excel功能点']}'"
-                    )
-                    print(
-                        f"  【关键】match_data['Word匹配项']: '{match_data['Word匹配项']}'"
-                    )
-                # ====== 调试信息结束 ======
 
                 if similarity_score >= 0.99:
                     exact_matched.append(match_data)
                 else:
                     fuzzy_matched.append(match_data)
             else:
-                row_info = excel_item.get("row_range", idx + 2)
                 match_data = {
                     "Excel功能点": excel_item["original"],
                     "状态": "[FAIL] 缺失",
-                    "简略描述": f"拆分表功能过程在需求规格书未体现：拆分表功能过程项 [{excel_item['original']}]（{row_info}行） 在需求规格书未体现",
+                    "简略描述": f"拆分表{excel_item['original']}在需求规格书未体现",
                 }
                 not_found_in_word.append(match_data)
-
-                # ====== 添加调试信息（仅前5条）======
-                if idx < 5:
-                    print(f"  [FAIL] 未找到匹配")
-                    print(
-                        f"  【关键】not_found Excel功能点: '{excel_item['original']}'"
-                    )
-                # ====== 调试信息结束 ======
 
         if progress_callback:
             progress_callback(90, "生成统计报告...")
@@ -1171,18 +1212,39 @@ class HierarchicalMatcher:
         best_quality = -1  # 用于打破得分平局的质量分
 
         # 预处理：去除目标字符串的所有空格（用于比较）
-        target_no_space = re.sub(r"\s+", "", target.lower())
+        if target is None:
+            target = ""
+        target_no_space = re.sub(r"\s+", "", str(target).lower())
+
+        # 预处理：目标字符集（用于快筛）
+        target_chars = set(target_no_space)
+        target_len = len(target_no_space)
 
         for candidate in candidates:
-            # 优化：缓存无空格文本的计算结果
+            # 优化 1：缓存无空格文本及字符集
             candidate_no_space = candidate.get("text_no_space")
             candidate_text = candidate.get("text", candidate.get("cleaned", ""))
 
             if candidate_no_space is None:
                 candidate_no_space = re.sub(r"\s+", "", candidate_text.lower())
                 candidate["text_no_space"] = candidate_no_space
+                candidate["char_set"] = set(candidate_no_space)
 
-            current_score = 0.0
+            candidate_chars = candidate.get("char_set")
+            if candidate_chars is None:
+                candidate_chars = set(candidate_no_space)
+                candidate["char_set"] = candidate_chars
+
+            # 优化 2：【重点】字集快筛 (Fast Jaccard-like filter)
+            # 如果目标较长，且两者字符重合度极低，直接跳过昂贵的相似度计算
+            if target_len > 5:
+                overlap = len(target_chars.intersection(candidate_chars))
+                # 经验阈值：字符重合率低于 30% 且不包含全字，通常相似度无法达到 0.7
+                if (
+                    overlap / target_len < 0.3
+                    and target_no_space not in candidate_no_space
+                ):
+                    continue
 
             # 1. 精确匹配（带空格）
             if target == candidate_text:
@@ -1262,12 +1324,38 @@ class HierarchicalMatcher:
         level3_col: int = 2,
         progress_callback=None,
         hierarchy_log_path: str = None,
+        word_sections_preloaded=None,  # [NEW] 层级匹配预置数据
     ) -> Dict:
         """层级匹配模式 (增强版)"""
         # 1. 统一提取 Word 内容
-        word_hierarchy = self.extract_word_content(
-            word_file, mode="hierarchical", progress_callback=progress_callback
-        )
+        if word_sections_preloaded is not None:
+            # 这里的 word_sections_preloaded 是 DocumentProcessor.extract_word_structure 返回的格式
+            # 需要将其转换为 HierarchicalMatcher 内部使用的三层层级字典格式
+            word_hierarchy = {"level1": [], "level2": [], "level3": []}
+            for idx, s in enumerate(word_sections_preloaded):
+                lvl = s.get("level", 0)
+                item = {
+                    "number": s.get("num", ""),
+                    "text": s.get("title", ""),
+                    "display": (
+                        f"[{s.get('num', '')}] {s.get('title', '')}"
+                        if s.get("num")
+                        else s.get("title", "")
+                    ),
+                    "depth": lvl,
+                    "order": idx,
+                    "in_toc": True,  # 预解析数据默认按标题类处理
+                }
+                if lvl == 1:
+                    word_hierarchy["level1"].append(item)
+                elif lvl == 2:
+                    word_hierarchy["level2"].append(item)
+                else:
+                    word_hierarchy["level3"].append(item)
+        else:
+            word_hierarchy = self.extract_word_content(
+                word_file, mode="hierarchical", progress_callback=progress_callback
+            )
 
         if progress_callback:
             progress_callback(25, "正在读取 Excel 数据...")
@@ -1410,165 +1498,34 @@ class HierarchicalMatcher:
         hierarchy_mismatched = []  # 新增：记录匹配但层级错位的项
         not_found_in_word = []
 
+        import concurrent.futures
+
+        # 预加载搜索空间以减少线程内过滤开销
+        l1_space = (
+            word_hierarchy["level1"]
+            + word_hierarchy["level2"]
+            + word_hierarchy["level3"]
+        )
+        l2_space = (
+            word_hierarchy["level2"]
+            + word_hierarchy["level1"]
+            + word_hierarchy["level3"]
+        )
+        l3_space = (
+            word_hierarchy["level3"]
+            + word_hierarchy["level2"]
+            + word_hierarchy["level1"]
+        )
+
         total = len(excel_data)
-        # 提高进度更新频率
-        update_interval = 1 if total < 500 else 10
+        u_interval = max(1, total // 20)
 
         for idx, excel_row in enumerate(excel_data):
-            if progress_callback:
-                if idx % update_interval == 0 or idx == total - 1:
-                    progress = 30 + int((idx / (total if total > 0 else 1)) * 60)
-                    progress_callback(progress, f"匹配中... {idx + 1}/{total}")
+            if progress_callback and (idx % u_interval == 0 or idx == total - 1):
+                progress = 30 + int((idx / (total if total > 0 else 1)) * 60)
+                progress_callback(progress, f"层级匹配中... {idx + 1}/{total}")
 
-            # 初始化当前 Excel 行的匹配结果和状态
-            # 如果 Excel 某级为空，则默认该级“已匹配”，以便不影响整体 all_levels_found 的判定
-            l1_matched_flag = not bool(excel_row["level1"])
-            l2_matched_flag = not bool(excel_row["level2"])
-            l3_matched_flag = not bool(excel_row["level3"])
-
-            l1_score = 1.0 if l1_matched_flag else 0.0
-            l2_score = 1.0 if l2_matched_flag else 0.0
-
-            # 追踪层级深度
-            l1_matched_depth = 2 if not excel_row["level1"] else 0
-            l2_matched_depth = 3 if not excel_row["level2"] else 0
-            l3_matched_depth = 4 if not excel_row["level3"] else 0
-
-            # --- DEBUG START ---
-            if idx < 3:  # 仅调试前3行
-                print(f"\n[DEBUG] 正在匹配第 {idx+1} 行 Excel 数据:")
-                print(f"  L1: '{excel_row['level1']}'")
-                print(f"  L2: '{excel_row['level2']}'")
-                print(f"  L3: '{excel_row['level3']}'")
-            # --- DEBUG END ---
-
-            # --- 尝试匹配 Excel L1 (对齐 Smart Directory: Word Level 2 / 4.x) ---
-            word_l1_num = ""
-            if excel_row["level1"]:
-                # 广泛搜索 Word 的所有真正目录项，但优先在 Word L2 中找，并寻找全局最佳匹配
-                all_word_items = (
-                    word_hierarchy["level1"]
-                    + word_hierarchy["level2"]
-                    + word_hierarchy["level3"]
-                )
-                found_l1, match_l1_item, score_l1 = self.find_match(
-                    excel_row["level1"], all_word_items
-                )
-                if found_l1 and score_l1 >= self.threshold:
-                    l1_matched_flag = True
-                    l1_score = score_l1
-                    word_l1_title = match_l1_item.get("display", "❌ 缺失")
-                    word_l1_num = match_l1_item.get("number", "")
-                    l1_matched_depth = match_l1_item.get("depth", 2)
-                else:
-                    word_l1_title = "❌ 缺失"
-            else:
-                word_l1_title = ""
-
-            # --- 尝试匹配 Excel L2 (对齐 Smart Directory: Word Level 3 / 4.x.x) ---
-            word_l2_num = ""
-            if excel_row["level2"]:
-                # 全局寻找最佳匹配，不再因为搜索顺序导致的层级错位
-                all_word_items = (
-                    word_hierarchy["level2"]
-                    + word_hierarchy["level1"]
-                    + word_hierarchy["level3"]
-                )
-                found_l2, match_l2_item, score_l2 = self.find_match(
-                    excel_row["level2"], all_word_items
-                )
-                if found_l2 and score_l2 >= self.threshold:
-                    l2_matched_flag = True
-                    l2_score = score_l2
-                    word_l2_title = match_l2_item.get("display", "❌ 缺失")
-                    word_l2_num = match_l2_item.get("number", "")
-                    l2_matched_depth = match_l2_item.get("depth", 3)
-                else:
-                    word_l2_title = "❌ 缺失"
-            else:
-                word_l2_title = ""
-
-            # --- 尝试匹配 Excel L3 (对齐 Smart Directory: Word Level 4/5 / 4.x.x.x) ---
-            l3_best_match_item = None
-            l3_best_score = 0.0
-            word_l3_title = "❌ 缺失"
-            word_l3_num = ""
-            l3_matched_depth = 4
-
-            if excel_row["level3"]:
-                # 全局寻找最佳匹配
-                all_word_items = (
-                    word_hierarchy["level3"]
-                    + word_hierarchy["level2"]
-                    + word_hierarchy["level1"]
-                )
-                found_l3, match_l3_item, score_l3 = self.find_match(
-                    excel_row["level3"], all_word_items
-                )
-                if found_l3 and score_l3 >= self.threshold:
-                    l3_best_match_item = match_l3_item
-                    l3_best_score = score_l3
-                    l3_matched_depth = match_l3_item.get("depth", 4)
-                    word_l3_title = match_l3_item.get("display", "❌ 缺失")
-                    word_l3_num = match_l3_item.get("number", "")
-            else:
-                word_l3_title = ""
-                word_l3_num = ""
-
-            l3_matched_flag = l3_best_match_item is not None
-
-            # ... 后续逻辑 ...
-
-            # --- DEBUG START ---
-            if excel_row["level3"] and not l3_matched_flag and idx < 10:
-                print(f"  [DEBUG-FAIL] L3 未找到匹配: '{excel_row['level3']}'")
-            # --- DEBUG END ---
-
-            # 构建完整的编号路径
-            # 用户要求：缺失必须留空，不再进行父级编号自动反推补全
-            p1 = word_l1_num if (word_l1_num and l1_matched_flag) else "-"
-            p2 = word_l2_num if (word_l2_num and l2_matched_flag) else "-"
-            p3 = word_l3_num if (word_l3_num and l3_matched_flag) else "-"
-
-            word_full_number = f"{p1} / {p2} / {p3}"
-
-            # 构建 '匹配层级' 字符串
-            matched_levels_str = []
-            if l1_matched_flag:
-                matched_levels_str.append(f"一级(Word L{l1_matched_depth})")
-            if l2_matched_flag:
-                matched_levels_str.append(f"二级(Word L{l2_matched_depth})")
-            if l3_matched_flag:
-                matched_levels_str.append(f"三级(Word L{l3_matched_depth})")
-
-            matching_level_text = (
-                "、".join(matched_levels_str) + "匹配"
-                if matched_levels_str
-                else "无匹配"
-            )
-
-            # 确定最终的相似度分数（主要基于 L3 匹配，如果 L3 未匹配则基于 L2/L1）
-            overall_similarity_score = 0.0
-            if l3_matched_flag:
-                overall_similarity_score = l3_best_score
-            elif l2_matched_flag:
-                overall_similarity_score = l2_score
-            elif l1_matched_flag:
-                overall_similarity_score = l1_score
-
-            # --- 生成简略描述 (修订版 V12 - 增强层级韧性) ---
-            l1_missing = bool(excel_row["level1"]) and not l1_matched_flag
-            l2_missing = bool(excel_row["level2"]) and not l2_matched_flag
-            l3_missing = bool(excel_row["level3"]) and not l3_matched_flag
-
-            # 只要任意一层匹配上，且分数足够高，就不再判定为完全缺失
-            # 这样即便 Excel L1 多填了一个“项目名”，只要 L2/L3 对得上，依旧能进“层级不匹配”展示，而不是进“缺失”页
-            has_any_match = (
-                (l1_matched_flag and not not excel_row["level1"])
-                or (l2_matched_flag and not not excel_row["level2"])
-                or (l3_matched_flag and not not excel_row["level3"])
-            )
-
+            # --- 内部辅助函数保持逻辑一致 ---
             def is_descendant(parent_num, child_num):
                 if not parent_num or not child_num:
                     return True
@@ -1576,193 +1533,261 @@ class HierarchicalMatcher:
                     return True
                 return child_num.startswith(parent_num + ".")
 
-            n1 = word_l1_num if l1_matched_flag else None
-            n2 = word_l2_num if l2_matched_flag else None
-            n3 = word_l3_num if l3_matched_flag else None
-
-            l1_l2_ok = is_descendant(n1, n2) if (n1 and n2) else True
-            l2_l3_ok = is_descendant(n2, n3) if (n2 and n3) else True
-            l1_l3_ok = is_descendant(n1, n3) if (n1 and n3) else True
-            path_broken_3_level = not l1_l2_ok or not l2_l3_ok
-
-            l1_text = excel_row["level1_original"]
-            l2_text = excel_row["level2_original"]
-            l3_text = excel_row["level3_original"]
-
             def get_formatted_row_info(total_count, range_str):
                 if not range_str:
                     return ""
-                # 如果是单行且没有范围符，依然可以加上行号以便精准定位
-                if total_count > 1 or "-" in range_str:
-                    return f"（{range_str}行）"
                 return f"（{range_str}行）"
 
-            # --- 生成简略描述 ---
-            missing_desc = "-"
-            if l1_missing or l2_missing or l3_missing:
-                m_lvls = []
-                m_parts = []
-                if l1_missing:
-                    m_lvls.append("一")
-                    row_info = get_formatted_row_info(
-                        excel_row["l1_total_count"], excel_row["l1_range"]
+            # 1. 初始化状态
+            l1_matched_flag = not bool(excel_row["level1"])
+            l2_matched_flag = not bool(excel_row["level2"])
+            l3_matched_flag = not bool(excel_row["level3"])
+
+            l1_score = 1.0 if l1_matched_flag else 0.0
+            l2_score = 1.0 if l2_matched_flag else 0.0
+            l1_matched_depth = 2 if not excel_row["level1"] else 0
+            l2_matched_depth = 3 if not excel_row["level2"] else 0
+            l3_matched_depth = 4 if not excel_row["level3"] else 0
+
+            word_l1_num, word_l1_title = "", ""
+            word_l2_num, word_l2_title = "", ""
+            word_l3_num, word_l3_title = "", ""
+            l3_best_match_item = None
+            l3_best_score = 0.0
+
+            # 2. 逐级比对 (L1 -> L2 -> L3)
+            if excel_row["level1"]:
+                found, match, score = self.find_match(excel_row["level1"], l1_space)
+                if found and score >= self.threshold:
+                    l1_matched_flag, l1_score = True, score
+                    word_l1_title, word_l1_num, l1_matched_depth = (
+                        match.get("display", "❌ 缺失"),
+                        match.get("number", ""),
+                        match.get("depth", 2),
                     )
-                    m_parts.append(f"一级模块 [{l1_text}]{row_info}")
-                if l2_missing:
-                    m_lvls.append("二")
-                    row_info = get_formatted_row_info(
-                        excel_row["l2_total_count"], excel_row["l2_range"]
+                else:
+                    word_l1_title = "❌ 缺失"
+
+            if excel_row["level2"]:
+                found, match, score = self.find_match(excel_row["level2"], l2_space)
+                if found and score >= self.threshold:
+                    l2_matched_flag, l2_score = True, score
+                    word_l2_title, word_l2_num, l2_matched_depth = (
+                        match.get("display", "❌ 缺失"),
+                        match.get("number", ""),
+                        match.get("depth", 3),
                     )
-                    m_parts.append(f"二级模块 [{l2_text}]{row_info}")
-                if l3_missing:
-                    m_lvls.append("三")
-                    row_info = get_formatted_row_info(
-                        excel_row["l3_total_count"], excel_row["l3_range"]
+                else:
+                    word_l2_title = "❌ 缺失"
+
+            if excel_row["level3"]:
+                found, match, score = self.find_match(excel_row["level3"], l3_space)
+                if found and score >= self.threshold:
+                    l3_matched_flag, l3_best_match_item, l3_best_score = (
+                        True,
+                        match,
+                        score,
                     )
-                    m_parts.append(f"三级模块 [{l3_text}]{row_info}")
+                    word_l3_title, word_l3_num, l3_matched_depth = (
+                        match.get("display", "❌ 缺失"),
+                        match.get("number", ""),
+                        match.get("depth", 4),
+                    )
+            else:
+                word_l3_title = ""
 
-                m_str = "".join(m_lvls)
-                missing_desc = f"拆分表{m_str}级模块在需求规格书未体现：拆分表{' - '.join(m_parts)} 在需求规格书未体现"
+            l3_matched_flag = l3_best_match_item is not None
 
-            mismatch_desc = "-"
-            depth_errs = []
-
-            # --- 智能层级深度校验 (修订版 V13 - 增强灵活性) ---
-            # 不再硬编码 1, 2, 3，而是检查层级是否严格递增且在该行的上下文中是合理的
-            depth_sequence = []
-            if excel_row["level1"] and l1_matched_flag:
-                depth_sequence.append(("一级", l1_matched_depth))
-            if excel_row["level2"] and l2_matched_flag:
-                depth_sequence.append(("二级", l2_matched_depth))
-            if excel_row["level3"] and l3_matched_flag:
-                depth_sequence.append(("三级", l3_matched_depth))
-
-            # 校验递增性
-            if len(depth_sequence) >= 2:
-                for i in range(len(depth_sequence) - 1):
-                    curr_name, curr_depth = depth_sequence[i]
-                    next_name, next_depth = depth_sequence[i + 1]
-                    if next_depth <= curr_depth:
-                        depth_errs.append(
-                            f"{next_name}深度(L{next_depth})未超过{curr_name}深度(L{curr_depth})"
-                        )
-                    elif next_depth - curr_depth > 2:
-                        depth_errs.append(
-                            f"{next_name}与{curr_name}层级跳跃过大(跳过{next_depth - curr_depth}级)"
-                        )
-
-            # 特殊检查：如果一级模块匹配到的深度太深（超过L3），通常意味着匹配到了正文细节，可能不准确
-            if excel_row["level1"] and l1_matched_flag and l1_matched_depth > 3:
-                depth_errs.append(f"一级模块匹配深度过深(L{l1_matched_depth})")
-
-            is_path_broken_now = False
-            if l1_matched_flag and l2_matched_flag and l3_matched_flag:
-                if not l1_l2_ok or not l2_l3_ok:
-                    is_path_broken_now = True
-            elif l2_matched_flag and l3_matched_flag and not l2_l3_ok:
-                is_path_broken_now = True
-            elif l1_matched_flag and l3_matched_flag and not l1_l3_ok:
-                is_path_broken_now = True
-
-            # 只要处于层级不匹配状态且有部分匹配上，就生成描述
-            if has_any_match and (
-                depth_errs
-                or is_path_broken_now
-                or l1_missing
-                or l2_missing
-                or l3_missing
-            ):
-                m_lvls = []
-                e_parts = []
-                w_parts = []
-                # 用户要求：仅体现“有的”（即匹配上的）层级，不体现“缺失”的
-                if excel_row["level1"] and l1_matched_flag:
-                    m_lvls.append("一")
-                    e_parts.append(f"一级模块 【{l1_text}】")
-                    w_parts.append(f"一级目录 【{word_l1_title}】")
-                if excel_row["level2"] and l2_matched_flag:
-                    m_lvls.append("二")
-                    e_parts.append(f"二级模块 【{l2_text}】")
-                    w_parts.append(f"二级目录 【{word_l2_title}】")
-                if excel_row["level3"] and l3_matched_flag:
-                    m_lvls.append("三")
-                    e_parts.append(f"三级模块 【{l3_text}】")
-                    w_parts.append(f"三级目录 【{word_l3_title}】")
-
-                if m_lvls:
-                    m_str = "".join(m_lvls)
-                    mismatch_desc = f"拆分表{m_str}级模块与需求规格书不匹配：拆分表{' - '.join(e_parts)} 与需求规格书{' - '.join(w_parts)}不匹配"
-                    # 这里不再单独拼接 depth_errs，因为已经包含在上述层级匹配结果展示中
-                    # if depth_errs: mismatch_desc += f" ({'；'.join(depth_errs)})"
-
-            combined = []
-            if missing_desc != "-":
-                combined.append(missing_desc)
-            if mismatch_desc != "-":
-                combined.append(mismatch_desc)
-            final_brief = "\n".join(combined) if combined else "-"
-
-            # 汇总缺失层级
-            missing_levels_list = []
-            if l1_missing:
-                missing_levels_list.append("一级缺失")
-            if l2_missing:
-                missing_levels_list.append("二级缺失")
-            if l3_missing:
-                missing_levels_list.append("三级缺失")
-            if depth_errs or is_path_broken_now:
-                missing_levels_list.append("层级不匹配")
-            missing_levels_text = (
-                "、".join(missing_levels_list) if missing_levels_list else "-"
+            # 3. 各种规则判定 (层级递增、关系闭环)
+            n1, n2, n3 = (
+                (word_l1_num if l1_matched_flag else None),
+                (word_l2_num if l2_matched_flag else None),
+                (word_l3_num if l3_matched_flag else None),
+            )
+            l1_l2_ok = is_descendant(n1, n2) if (n1 and n2) else True
+            l2_l3_ok = is_descendant(n2, n3) if (n2 and n3) else True
+            l1_l3_ok = is_descendant(n1, n3) if (n1 and n3) else True
+            path_broken = (
+                (
+                    l1_matched_flag
+                    and l2_matched_flag
+                    and l3_matched_flag
+                    and (not l1_l2_ok or not l2_l3_ok)
+                )
+                or (l2_matched_flag and l3_matched_flag and not l2_l3_ok)
+                or (l1_matched_flag and l3_matched_flag and not l1_l3_ok)
             )
 
-            # 构建数据行
-            match_data = {
-                "Excel一级模块": l1_text,
+            # 深度校验
+            depth_errs = []
+            depth_seq = []
+            if excel_row["level1"] and l1_matched_flag:
+                depth_seq.append(("一级", l1_matched_depth))
+            if excel_row["level2"] and l2_matched_flag:
+                depth_seq.append(("二级", l2_matched_depth))
+            if excel_row["level3"] and l3_matched_flag:
+                depth_seq.append(("三级", l3_matched_depth))
+            if len(depth_seq) >= 2:
+                for i in range(len(depth_seq) - 1):
+                    if depth_seq[i + 1][1] <= depth_seq[i][1]:
+                        depth_errs.append(f"{depth_seq[i+1][0]}深度不足")
+                    elif depth_seq[i + 1][1] - depth_seq[i][1] > 2:
+                        depth_errs.append("层级跳跃过大")
+            if excel_row["level1"] and l1_matched_flag and l1_matched_depth > 3:
+                depth_errs.append("一级匹配过深")
+
+            # 4. 构建描述与状态
+            l1_missing = bool(excel_row["level1"]) and not l1_matched_flag
+            l2_missing = bool(excel_row["level2"]) and not l2_matched_flag
+            l3_missing = bool(excel_row["level3"]) and not l3_matched_flag
+            has_any = (
+                (l1_matched_flag and excel_row["level1"])
+                or (l2_matched_flag and excel_row["level2"])
+                or (l3_matched_flag and excel_row["level3"])
+            )
+
+            missing_desc = "-"
+            if l1_missing or l2_missing or l3_missing:
+                m_parts = []
+                if l1_missing:
+                    m_parts.append(f"一级模块 [{excel_row['level1_original']}]")
+                if l2_missing:
+                    m_parts.append(f"二级模块 [{excel_row['level2_original']}]")
+                if l3_missing:
+                    m_parts.append(f"三级模块 [{excel_row['level3_original']}]")
+
+                count_missing = len(m_parts)
+                if count_missing == 1:
+                    prefix = (
+                        "拆分表一级模块在需求规格书未体现："
+                        if l1_missing
+                        else (
+                            "拆分表二级模块在需求规格书未体现："
+                            if l2_missing
+                            else "拆分表三级模块在需求规格书未体现："
+                        )
+                    )
+                    missing_desc = f"{prefix}拆分表{m_parts[0]} 在需求规格书未体现"
+                else:
+                    level_names = "".join(
+                        [
+                            "一" if l1_missing else "",
+                            "二" if l2_missing else "",
+                            "三" if l3_missing else "",
+                        ]
+                    )
+                    prefix = f"拆分表{level_names}级模块在需求规格书未体现："
+                    missing_desc = (
+                        f"{prefix}拆分表{'、'.join(m_parts)} 在需求规格书未体现"
+                    )
+
+            mismatch_desc = "-"
+            # 改进判定：只要 matched 且 (有路径错误 或 有深度错误 或 有层级丢失)
+            if has_any and (
+                depth_errs or path_broken or l1_missing or l2_missing or l3_missing
+            ):
+                # 只有当至少有两个层级被匹配到时，才进行路径不匹配描述（排除掉缺失的部分）
+                matched_levels = []
+                if excel_row["level1"] and l1_matched_flag:
+                    matched_levels.append(1)
+                if excel_row["level2"] and l2_matched_flag:
+                    matched_levels.append(2)
+                if excel_row["level3"] and l3_matched_flag:
+                    matched_levels.append(3)
+
+                if (
+                    path_broken
+                    or depth_errs
+                    or any([l1_missing, l2_missing, l3_missing])
+                ) and len(matched_levels) >= 2:
+                    e_segments = []
+                    w_segments = []
+                    m_names = []
+                    for lvl in matched_levels:
+                        if lvl == 1:
+                            e_segments.append(
+                                f"一级模块{{{excel_row['level1_original']}}}"
+                            )
+                            w_segments.append(f"一级目录{{{word_l1_title}}}")
+                            m_names.append("一")
+                        elif lvl == 2:
+                            e_segments.append(
+                                f"二级模块{{{excel_row['level2_original']}}}"
+                            )
+                            w_segments.append(f"二级目录{{{word_l2_title}}}")
+                            m_names.append("二")
+                        elif lvl == 3:
+                            e_segments.append(
+                                f"三级模块{{{excel_row['level3_original']}}}"
+                            )
+                            w_segments.append(f"三级目录{{{word_l3_title}}}")
+                            m_names.append("三")
+
+                    m_str = "".join(m_names)
+                    # 严格按照用户要求的格式：拆分表{m_str}级模块与需求规格书不匹配：拆分表 {' - '.join(e_segments)} 与需求规格书 {' - '.join(w_segments)}不匹配
+                    mismatch_desc = f"拆分表{m_str}级模块与需求规格书不匹配：拆分表 {' - '.join(e_segments)} 与需求规格书 {' - '.join(w_segments)}不匹配"
+
+                    # if depth_errs:
+                    #     mismatch_desc += f" (原因: {', '.join(depth_errs)})"
+                elif depth_errs and not mismatch_desc.startswith("拆分表"):
+                    mismatch_desc = f"层级深度不匹配：{', '.join(depth_errs)}"
+
+            # 最终整合：优先展示缺失，其次展示层级不匹配
+            final_brief = (
+                missing_desc
+                if missing_desc != "-"
+                else (mismatch_desc if mismatch_desc != "-" else "-")
+            )
+
+            # 最终整合
+            word_full_num = (
+                f"{word_l1_num or '-'}/{word_l2_num or '-'}/{word_l3_num or '-'}"
+            )
+            sim_score = (
+                l3_best_score
+                if l3_matched_flag
+                else (l2_score if l2_matched_flag else l1_score)
+            )
+            match_status = (
+                "缺失"
+                if not has_any
+                else (
+                    "层级不匹配"
+                    if (
+                        l1_missing
+                        or l2_missing
+                        or l3_missing
+                        or path_broken
+                        or depth_errs
+                    )
+                    else ("精确匹配" if sim_score >= 0.99 else "模糊匹配")
+                )
+            )
+
+            data = {
+                "Excel一级模块": excel_row["level1_original"],
                 "Word一级标题": word_l1_title,
-                "Excel二级模块": l2_text,
+                "Excel二级模块": excel_row["level2_original"],
                 "Word二级标题": word_l2_title,
-                "Excel三级模块": l3_text,
+                "Excel三级模块": excel_row["level3_original"],
                 "Word三级标题": word_l3_title,
-                "Word完整编号": word_full_number,
-                "相似度": (
-                    f"{overall_similarity_score:.2%}"
-                    if overall_similarity_score > 0
-                    else ""
-                ),
-                "匹配层级": matching_level_text,
-                "缺失层级": missing_levels_text,
+                "Word完整编号": word_full_num,
+                "相似度": f"{sim_score:.2%}" if sim_score > 0 else "",
+                "匹配状态": match_status,
                 "缺失简略描述": missing_desc,
                 "层级不匹配简略描述": mismatch_desc,
                 "简略描述": final_brief,
                 "row_range": excel_row.get("final_row_info", ""),
             }
 
-            # 最终状态判定
-            if not has_any_match:
-                match_data["匹配状态"] = "缺失"
-                not_found_in_word.append(match_data)
-            elif (
-                (l1_missing or l2_missing or l3_missing)
-                or is_path_broken_now
-                or depth_errs
-            ):
-                match_data["匹配状态"] = "层级不匹配"
-                hierarchy_mismatched.append(match_data)
+            if match_status == "精确匹配":
+                exact_matched.append(data)
+            elif match_status == "模糊匹配":
+                fuzzy_matched.append(data)
+            elif match_status == "层级不匹配":
+                hierarchy_mismatched.append(data)
             else:
-                l1_ok = (not excel_row["level1"]) or (
-                    l1_matched_flag and l1_score >= 0.99
-                )
-                l2_ok = (not excel_row["level2"]) or (
-                    l2_matched_flag and l2_score >= 0.99
-                )
-                l3_ok = (not excel_row["level3"]) or (l3_best_score >= 0.99)
-                if l1_ok and l2_ok and l3_ok:
-                    match_data["匹配状态"] = "精确匹配"
-                    exact_matched.append(match_data)
-                else:
-                    match_data["匹配状态"] = "模糊匹配"
-                    fuzzy_matched.append(match_data)
+                not_found_in_word.append(data)
 
         if progress_callback:
             progress_callback(90, "生成统计报告...")

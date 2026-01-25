@@ -16,10 +16,11 @@ from PySide6.QtWidgets import (
     QScrollArea,
 )
 from PySide6.QtCore import Qt, Signal, QByteArray, QSize
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QPixmap
 from utils.path_utils import get_resource_path
-from .upload_dialog import UploadAreaWidget, ElidedLabel
+from .upload_dialog import UploadAreaWidget, ElidedLabel, DragOverlay
 from extend.matcher_config import MatcherConfig
+from utils.archive_utils import ArchiveUtils
 
 
 class ReReviewFileItem(QFrame):
@@ -66,14 +67,16 @@ class ReReviewFileItem(QFrame):
         # 状态
         status_label = QLabel("评估报告" if is_eval_report else "待重评文件")
         status_label.setProperty("class", "task-meta")
-        status_label.setFixedWidth(80) # 固定宽度，防止压缩
+        status_label.setFixedWidth(80)  # 固定宽度，防止压缩
         status_label.setAlignment(Qt.AlignCenter)
-        status_label.setStyleSheet(f"""
-            font-size: 11px; font-weight: 600; 
+        status_label.setStyleSheet(
+            f"""
+            font-size: 11px; font-weight: 600;
             color: {'#10b981' if is_eval_report else '#3b82f6'};
             background: {'rgba(16, 185, 129, 0.1)' if is_eval_report else 'rgba(59, 130, 246, 0.1)'};
             border-radius: 4px; padding: 2px 4px;
-        """)
+        """
+        )
         layout.addWidget(status_label)
 
         # 删除按钮
@@ -109,6 +112,7 @@ class ReReviewUploadDialog(QDialog):
         self.setWindowTitle("新建重评任务")
         self.setMinimumSize(700, 600)
         self.setWindowIcon(QIcon(get_resource_path("ui/logo.png")))
+        self.setAcceptDrops(True)  # 支持全局拖拽
 
         # 应用原生标题栏深色模式
         from PySide6.QtWidgets import QApplication
@@ -122,7 +126,28 @@ class ReReviewUploadDialog(QDialog):
         self.excel1_path = ""
         self.excel2_path = ""
 
+        # 初始化拖拽覆盖层
+        self.drag_overlay = DragOverlay(self)
+
         self.setup_ui()
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        """支持全局拖拽进入"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.drag_overlay.show_overlay()
+
+    def dragLeaveEvent(self, event):
+        """拖拽离开"""
+        self.drag_overlay.hide()
+
+    def dropEvent(self, event: QDropEvent):
+        """支持全局拖拽放下"""
+        self.drag_overlay.hide()
+        if event.mimeData().hasUrls():
+            files = [url.toLocalFile() for url in event.mimeData().urls()]
+            self.handle_files(files)
+            event.acceptProposedAction()
 
     def setup_ui(self):
         # 主布局
@@ -142,11 +167,29 @@ class ReReviewUploadDialog(QDialog):
         layout.setSpacing(25)
 
         title = QLabel("vlookup 重评自动标注项目")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; margin-bottom: 10px;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 5px;")
         layout.addWidget(title)
 
-        # ========== 1. 文件选择区域 ==========
+        # ========== 1. 文件选择区域 (模拟图4样式的深色蓝框) ==========
         file_section = QGroupBox("📂 文件选择 (支持拖拽 Excel)")
+        file_section.setStyleSheet(
+            """
+            QGroupBox {
+                border: 2px solid #38bdf8;
+                border-radius: 12px;
+                margin-top: 15px;
+                padding-top: 15px;
+                font-weight: bold;
+                color: #38bdf8;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 15px;
+                padding: 0 5px;
+            }
+        """
+        )
         file_layout = QVBoxLayout(file_section)
         file_layout.setContentsMargins(20, 20, 20, 20)
         file_layout.setSpacing(15)
@@ -165,17 +208,18 @@ class ReReviewUploadDialog(QDialog):
 
         self.files_scroll = QScrollArea()
         self.files_scroll.setWidgetResizable(True)
-        self.files_scroll.setFixedHeight(150)
+        self.files_scroll.setFixedHeight(180)
         self.files_scroll.setStyleSheet(
             """
             QScrollArea {
-                border: 1px solid palette(mid);
+                border: 1px solid #4b5563;
                 border-radius: 8px;
-                background-color: transparent;
+                background-color: rgba(31, 41, 55, 0.5);
             }
         """
         )
         self.queue_content = QWidget()
+        self.queue_content.setStyleSheet("background: transparent;")
         self.queue_layout = QVBoxLayout(self.queue_content)
         self.queue_layout.setSpacing(8)
         self.queue_layout.addStretch()
@@ -203,7 +247,7 @@ class ReReviewUploadDialog(QDialog):
             """
             QFrame#DialogFooter {
                 background-color: transparent;
-                border-top: 1px solid palette(mid);
+                border-top: 1px solid #374151;
             }
         """
         )
@@ -212,8 +256,8 @@ class ReReviewUploadDialog(QDialog):
 
         self.btn_run = QPushButton("开始处理")
         self.btn_run.setFixedHeight(45)
-        self.btn_run.setFixedWidth(200)
-        self.btn_run.setObjectName("UploadBtn")  # 复用 Theme.py 中的 UploadBtn 样式
+        self.btn_run.setFixedWidth(240)
+        self.btn_run.setObjectName("UploadBtn")
         self.btn_run.clicked.connect(self.run_process)
         footer_layout.addStretch()
         footer_layout.addWidget(self.btn_run)
@@ -223,7 +267,16 @@ class ReReviewUploadDialog(QDialog):
 
     def handle_files(self, files):
         """处理拖拽进出的文件"""
-        excel_files = [f for f in files if f.lower().endswith(".xlsx")]
+        # 预处理压缩包
+        expanded_files = []
+        for f in files:
+            if ArchiveUtils.is_archive(f):
+                extracted = ArchiveUtils.extract_archive(f)
+                expanded_files.extend(extracted)
+            else:
+                expanded_files.append(f)
+
+        excel_files = [f for f in expanded_files if f.lower().endswith(".xlsx")]
         for f in excel_files:
             filename = os.path.basename(f).replace(".xlsx", "")
             is_eval = bool(re.search(r"\d+$", filename))

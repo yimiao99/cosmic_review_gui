@@ -66,6 +66,19 @@ class RuntimeLogger:
         cls._write_to_file(log_entry)
 
     @classmethod
+    def get_current_log_path(cls):
+        """获取当前会话生成的日志文件路径"""
+        from extend.matcher_config import MatcherConfig
+
+        config = MatcherConfig.load()
+        output_dir = config.get("storage", {}).get("logs", "logs")
+        if not os.path.exists(output_dir):
+            return None
+        if not cls._current_log_filename:
+            return None
+        return os.path.abspath(os.path.join(output_dir, cls._current_log_filename))
+
+    @classmethod
     def _write_to_file(cls, log_entry):
         try:
             from extend.matcher_config import MatcherConfig
@@ -81,11 +94,13 @@ class RuntimeLogger:
                 time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
                 if cls._current_project:
                     # 清理项目名称中的非法字符
-                    safe_name = "".join([c for c in cls._current_project if c not in '<>:"/\\|?*']).strip()
+                    safe_name = "".join(
+                        [c for c in cls._current_project if c not in '<>:"/\\|?*']
+                    ).strip()
                     cls._current_log_filename = f"{safe_name}_{time_str}.log"
                 else:
                     cls._current_log_filename = f"Runtime_{time_str}.log"
-            
+
             target_path = os.path.join(output_dir, cls._current_log_filename)
 
             with open(target_path, "a", encoding="utf-8") as f:
@@ -126,7 +141,9 @@ class RuntimeLogger:
     def set_project(cls, project_name):
         """设置当前项目名称，用于后续日志文件名的生成"""
         cls._current_project = project_name
-        cls._current_log_filename = None  # 重置文件名，以便下次写入时生成包含项目名的新文件
+        cls._current_log_filename = (
+            None  # 重置文件名，以便下次写入时生成包含项目名的新文件
+        )
         cls._logs = []  # 切换项目时清空内存日志
         if project_name:
             cls.log(f"=== 项目 [{project_name}] 日志开始 ===")

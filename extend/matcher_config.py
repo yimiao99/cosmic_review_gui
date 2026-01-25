@@ -68,6 +68,7 @@ class MatcherConfig:
                 "re_review": os.path.join(user_docs, "ReReview"),
                 "receipt": os.path.join(user_docs, "Receipt"),
                 "logs": os.path.join(user_docs, "Logs"),
+                "extraction": os.path.join(user_docs, "Extraction"),
             },
             "theme": {
                 "primary_color": "#2563eb",
