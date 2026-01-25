@@ -36,6 +36,7 @@ from PySide6.QtGui import (
 from ui.task_card import TaskCard
 from utils.document_processor import DocumentProcessor
 from utils.similarity_checker import SimilarityChecker
+from utils.archive_utils import ArchiveUtils  # ✅ 导入压缩包处理工具
 from utils.styles import apply_dark_title_bar
 from utils.path_utils import get_resource_path
 
@@ -258,7 +259,7 @@ class UploadAreaWidget(QFrame):
         layout.addWidget(main_text)
 
         # 提示文本
-        hint_text = QLabel("支持 .docx 和 .xlsx 自动配对")
+        hint_text = QLabel("支持 .docx、.xlsx 及 .zip 自动配对")
         hint_text.setProperty("class", "task-meta")
         hint_text.setStyleSheet("font-size: 11px;")
         hint_text.setAlignment(Qt.AlignCenter)
@@ -808,7 +809,18 @@ class UploadDialog(QDialog):
             print("=" * 50)
             print("开始处理文件:")
 
-            for file_path in files:
+            # 新增：预处理压缩包，将其内部文件展开到待处理列表中
+            expanded_files = []
+            for f in files:
+                if ArchiveUtils.is_archive(f):
+                    print(f"检测到压缩包: {os.path.basename(f)}，正在解压...")
+                    extracted = ArchiveUtils.extract_archive(f)
+                    expanded_files.extend(extracted)
+                else:
+                    expanded_files.append(f)
+
+            # 使用展开后的文件列表进行后续处理
+            for file_path in expanded_files:
                 filename = os.path.basename(file_path)
                 base_name = os.path.splitext(filename)[0]
                 ext = os.path.splitext(filename)[1].lower()
@@ -859,7 +871,9 @@ class UploadDialog(QDialog):
 
             print("\n当前文件队列:")
             for key, value in self.file_queue.items():
-                print(f"  '{key}': Word={value['has_word']}, Excel={value['has_excel']}")
+                print(
+                    f"  '{key}': Word={value['has_word']}, Excel={value['has_excel']}"
+                )
             print("=" * 50)
 
             # 当有Excel文件被添加时，更新下拉框选项
@@ -870,6 +884,7 @@ class UploadDialog(QDialog):
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
             import traceback
+
             error_msg = f"处理文件时发生意外错误:\n{str(e)}\n\n{traceback.format_exc()}"
             print(error_msg)
             QMessageBox.critical(self, "错误", error_msg)

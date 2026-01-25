@@ -20,6 +20,7 @@ from PySide6.QtGui import QIcon, QImage, QPixmap
 from utils.path_utils import get_resource_path
 from .upload_dialog import UploadAreaWidget, ElidedLabel
 from extend.matcher_config import MatcherConfig
+from utils.archive_utils import ArchiveUtils
 
 
 class ReReviewFileItem(QFrame):
@@ -66,14 +67,16 @@ class ReReviewFileItem(QFrame):
         # 状态
         status_label = QLabel("评估报告" if is_eval_report else "待重评文件")
         status_label.setProperty("class", "task-meta")
-        status_label.setFixedWidth(80) # 固定宽度，防止压缩
+        status_label.setFixedWidth(80)  # 固定宽度，防止压缩
         status_label.setAlignment(Qt.AlignCenter)
-        status_label.setStyleSheet(f"""
-            font-size: 11px; font-weight: 600; 
+        status_label.setStyleSheet(
+            f"""
+            font-size: 11px; font-weight: 600;
             color: {'#10b981' if is_eval_report else '#3b82f6'};
             background: {'rgba(16, 185, 129, 0.1)' if is_eval_report else 'rgba(59, 130, 246, 0.1)'};
             border-radius: 4px; padding: 2px 4px;
-        """)
+        """
+        )
         layout.addWidget(status_label)
 
         # 删除按钮
@@ -223,7 +226,16 @@ class ReReviewUploadDialog(QDialog):
 
     def handle_files(self, files):
         """处理拖拽进出的文件"""
-        excel_files = [f for f in files if f.lower().endswith(".xlsx")]
+        # 预处理压缩包
+        expanded_files = []
+        for f in files:
+            if ArchiveUtils.is_archive(f):
+                extracted = ArchiveUtils.extract_archive(f)
+                expanded_files.extend(extracted)
+            else:
+                expanded_files.append(f)
+
+        excel_files = [f for f in expanded_files if f.lower().endswith(".xlsx")]
         for f in excel_files:
             filename = os.path.basename(f).replace(".xlsx", "")
             is_eval = bool(re.search(r"\d+$", filename))

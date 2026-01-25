@@ -14,11 +14,34 @@ if project_root not in sys.path:
 
 from extend.hierarchical_matcher import HierarchicalMatcher
 from extend.matcher_config import MatcherConfig
+from utils.report_generator import ReportGenerator
+from datetime import datetime
 import json
 
 
 class DocumentProcessor:
     """文档处理类，用于提取 Word 和 Excel 的内容结构"""
+
+    # 类级缓存
+    _temp_files = []
+    _cache = {}
+
+    @staticmethod
+    def clear_cache():
+        """清理缓存和临时文件"""
+        # 清理临时文件
+        for temp_file in DocumentProcessor._temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    if os.path.isfile(temp_file):
+                        os.remove(temp_file)
+                    elif os.path.isdir(temp_file):
+                        shutil.rmtree(temp_file)
+            except Exception as e:
+                print(f"[CLEANUP] 无法删除临时文件 {temp_file}: {e}")
+
+        DocumentProcessor._temp_files = []
+        DocumentProcessor._cache = {}
 
     @staticmethod
     def _convert_doc_to_docx(doc_path):
@@ -134,17 +157,60 @@ class DocumentProcessor:
             pythoncom.CoUninitialize()
 
     @staticmethod
+    def load_word_document(file_path):
+        """加载 Word 文档并返回 Document 对象"""
+        file_path_str = str(file_path)
+        try:
+            if file_path_str.lower().endswith(".doc"):
+                temp_docx = DocumentProcessor._convert_doc_to_docx(file_path_str)
+                if temp_docx:
+                    # 记录临时文件供后续清理
+                    DocumentProcessor._temp_files.append(temp_docx)
+                    return Document(temp_docx)
+                else:
+                    raise ValueError(f"Failed to convert .doc file: {file_path_str}")
+            else:
+                return Document(file_path_str)
+        except Exception as e:
+            print(f"[ERROR] 加载 Word 文档失败: {file_path_str} - {e}")
+            raise
+
+    @staticmethod
+    def load_excel_workbook(file_path, cache=True):
+        """加载 Excel 工作簿"""
+        file_path_str = str(file_path)
+        try:
+            # 使用 openpyxl 或 pandas 加载 Excel
+            import openpyxl
+
+            wb = openpyxl.load_workbook(file_path_str, data_only=False)
+            if cache:
+                DocumentProcessor._cache[file_path_str] = wb
+            return wb
+        except Exception as e:
+            print(f"[ERROR] 加载 Excel 工作簿失败: {file_path_str} - {e}")
+            raise
+
+    @staticmethod
     def extract_word_structure(file_path):
         """
         提取 Word 文档的全层级标题及正文
+        支持文件路径（str）或已加载的 Document 对象
         """
         import re  # 确保在函数作用域内可以访问re模块
 
         temp_docx = None
-        # 统一转为字符串处理，防止 pathlib.Path 对象导致 lower() 失败
-        file_path_str = str(file_path)
-        print(f"[PROCESS] 开始提取结构: {file_path_str}")
-        try:
+        doc = None
+
+        # 检查是否已是 Document 对象（通过类名检查，避免 isinstance 作用域问题）
+        if hasattr(file_path, "paragraphs") and hasattr(file_path, "element"):
+            # 这是一个 Document 对象
+            doc = file_path
+            print(f"[PROCESS] 已接收 Document 对象，段落数: {len(doc.paragraphs)}")
+        else:
+            # 统一转为字符串处理，防止 pathlib.Path 对象导致 lower() 失败
+            file_path_str = str(file_path)
+            print(f"[PROCESS] 开始提取结构: {file_path_str}")
             if file_path_str.lower().endswith(".doc"):
                 print(f"[PROCESS] 检测到 .doc 格式，启动 COM 转换...")
                 temp_docx = DocumentProcessor._convert_doc_to_docx(file_path_str)
@@ -158,6 +224,8 @@ class DocumentProcessor:
             print(f"[PROCESS] 正在加载 docx 对象: {doc_to_read}")
             doc = Document(doc_to_read)
             print(f"[PROCESS] 加载完成，段落数: {len(doc.paragraphs)}")
+
+        try:
             sections = []
 
             # 预识别文档是否使用了“标题”样式簇
@@ -463,10 +531,7 @@ class DocumentProcessor:
                         is_heading_style
                         or is_bold
                         or is_core
-                        or (
-                            is_very_short
-                            and "list" not in style_lower
-                        )
+                        or (is_very_short and "list" not in style_lower)
                     ):
                         return None
                     return 1
@@ -788,10 +853,12 @@ class DocumentProcessor:
                         # 无编号章节，直接使用原标题，不添加编号
                         final_title = text
                         use_toc_number = False  # 标记为无编号，跳过后续的TOC编号处理
-                        
+
                         # 【保存无编号章节】
-                        print(f"[DEBUG-WORD-STRUCTURE] Level: {level} | FinalTitle: {final_title}")
-                        
+                        print(
+                            f"[DEBUG-WORD-STRUCTURE] Level: {level} | FinalTitle: {final_title}"
+                        )
+
                         # 保存前一个章节
                         if (
                             current_section["title"] != "前言/未归类"
@@ -841,7 +908,7 @@ class DocumentProcessor:
                             use_toc_number = False
                             # 使用TOC的层级，但用自动编号
                             level = toc_level
-                            
+
                             # 【边界检查】
                             if level >= len(level_counters):
                                 print(f"[WARN] 层级 {level} 过深，跳过: {text[:40]}")
@@ -856,22 +923,28 @@ class DocumentProcessor:
 
                             # 构建自动编号（跳过值为0的层级）
                             active_parts = [
-                                level_counters[i] 
-                                for i in range(1, level + 1) 
+                                level_counters[i]
+                                for i in range(1, level + 1)
                                 if level_counters[i] > 0
                             ]
                             auto_num = ".".join(map(str, active_parts))
-                            
+
                             # 清理标题文本
                             clean_text = re.sub(r"^[\d\.]+\s*", "", text).strip()
                             final_title = f"{auto_num} {clean_text}"
-                            
+
                             # 记录已使用的编号
                             used_numbers.add(auto_num)
-                            
-                            print(f"[AUTO-NUM-FALLBACK] TOC冲突，使用自动编号: {auto_num}, Level: {level}")
-                            print(f"    → Generated: {auto_num}, Counters[1-6]: {level_counters[1:7]}")
-                            print(f"[DEBUG-WORD-STRUCTURE] Level: {level} | FinalTitle: {final_title}")
+
+                            print(
+                                f"[AUTO-NUM-FALLBACK] TOC冲突，使用自动编号: {auto_num}, Level: {level}"
+                            )
+                            print(
+                                f"    → Generated: {auto_num}, Counters[1-6]: {level_counters[1:7]}"
+                            )
+                            print(
+                                f"[DEBUG-WORD-STRUCTURE] Level: {level} | FinalTitle: {final_title}"
+                            )
 
                             # 保存前一个章节
                             if (
@@ -899,7 +972,9 @@ class DocumentProcessor:
 
                             # 提取编号
                             num_match = re.match(r"^([\d\.]+)", final_title)
-                            section_num = num_match.group(1).rstrip(".") if num_match else ""
+                            section_num = (
+                                num_match.group(1).rstrip(".") if num_match else ""
+                            )
 
                             current_section = {
                                 "level": level,
@@ -941,7 +1016,7 @@ class DocumentProcessor:
 
                         # 直接构造最终标题，不走后续手动编号流程
                         level = toc_level
-                        
+
                         # 【修复】处理无编号的TOC条目（如"附录A"）
                         if toc_number is None or toc_number == "":
                             # 没有编号，直接使用原文本
@@ -953,7 +1028,9 @@ class DocumentProcessor:
                                 rf"^{re.escape(toc_number)}([^\u4e00-\u9fa5]*)", text
                             )
                             if sep_match:
-                                separator = sep_match.group(1)  # 可能是"."或" "或".  "等
+                                separator = sep_match.group(
+                                    1
+                                )  # 可能是"."或" "或".  "等
                                 final_title = f"{toc_number}{separator}{clean_text}"
                             else:
                                 # 如果原文没有编号，则使用TOC编号（这种情况下原文可能只是标题）
@@ -1005,7 +1082,9 @@ class DocumentProcessor:
 
                         # 提取编号(支持数字后的空格)
                         num_match = re.match(r"^([\d\.]+)", final_title)
-                        section_num = num_match.group(1).rstrip(".") if num_match else ""
+                        section_num = (
+                            num_match.group(1).rstrip(".") if num_match else ""
+                        )
 
                         current_section = {
                             "level": level,
@@ -1331,8 +1410,8 @@ class DocumentProcessor:
                             # 【修复】跳过值为0的中间层级，避免生成 3.0.1 这样的编号
                             # 当文档结构跳级时（如 Level 1 → Level 3），只保留有值的层级
                             active_parts = [
-                                level_counters[i] 
-                                for i in range(1, level + 1) 
+                                level_counters[i]
+                                for i in range(1, level + 1)
                                 if level_counters[i] > 0
                             ]
                             auto_num = ".".join(map(str, active_parts))
@@ -1347,7 +1426,7 @@ class DocumentProcessor:
                                 r"^[\d\.．]+\s*", "", text
                             ).strip()
                             clean_title = f"{auto_num} {clean_content_temp}"
-                            
+
                             # 记录已使用的编号
                             used_numbers.add(auto_num)
 
@@ -1504,15 +1583,22 @@ class DocumentProcessor:
             import openpyxl
             from utils.runtime_logger import RuntimeLogger
 
-            # 增加 read_only=True 提高大型/复杂 XML 文件的加载成功率
-            # 这种模式比普通加载占用内存更少，且对某些特殊格式（如超长行）更鲁棒
-            try:
-                wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
-            except Exception as e:
-                RuntimeLogger.log(
-                    f"Excel 初始加载失败: {e}，尝试标准模式加载...", level="WARN"
-                )
-                wb = openpyxl.load_workbook(file_path, data_only=True)
+            # 检查是否已是 Workbook 对象
+            if hasattr(file_path, "sheetnames") and hasattr(file_path, "active"):
+                # 这是一个 Workbook 对象
+                wb = file_path
+            else:
+                # 增加 read_only=True 提高大型/复杂 XML 文件的加载成功率
+                # 这种模式比普通加载占用内存更少，且对某些特殊格式（如超长行）更鲁棒
+                try:
+                    wb = openpyxl.load_workbook(
+                        file_path, data_only=True, read_only=True
+                    )
+                except Exception as e:
+                    RuntimeLogger.log(
+                        f"Excel 初始加载失败: {e}，尝试标准模式加载...", level="WARN"
+                    )
+                    wb = openpyxl.load_workbook(file_path, data_only=True)
 
             target_sheet_name = sheet_name
 
@@ -1642,22 +1728,29 @@ class DocumentProcessor:
     def check_adjustment_factors_in_word(file_path):
         """
         深度扫描 Word 正文段落及表格中的附加值调整因子 (Node 4)
+        支持文件路径（str）或已加载的 Document 对象
         """
         temp_docx = None
+        doc = None
         try:
             from docx import Document
             import re
 
-            # .doc 转换处理
-            if file_path.lower().endswith(".doc"):
-                temp_docx = DocumentProcessor._convert_doc_to_docx(file_path)
-                if not temp_docx:
-                    return {}
-                doc_to_read = temp_docx
+            # 检查是否已是 Document 对象
+            if hasattr(file_path, "paragraphs") and hasattr(file_path, "element"):
+                # 这是一个 Document 对象
+                doc = file_path
             else:
-                doc_to_read = file_path
+                # .doc 转换处理
+                if file_path.lower().endswith(".doc"):
+                    temp_docx = DocumentProcessor._convert_doc_to_docx(file_path)
+                    if not temp_docx:
+                        return {}
+                    doc_to_read = temp_docx
+                else:
+                    doc_to_read = file_path
 
-            doc = Document(doc_to_read)
+                doc = Document(doc_to_read)
 
             # 因子初始化
             factors = {
@@ -2175,9 +2268,73 @@ class DocumentProcessor:
                 ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
                 final_errors.append(f"列 [{kw}] -> 第 {', '.join(ranges)} 行为空")
 
-            return {"is_ok": len(final_errors) == 0, "errors": final_errors}
+            # 7. 生成报告文件 (包含时间戳)
+            report_path = None
+            if True:  # 总是生成报告供查询
+                try:
+                    import pandas as pd
+                    from datetime import datetime
+
+                    # 获取项目名称 (不含路径和扩展名)
+                    base_name = os.path.splitext(os.path.basename(file_path))[0]
+
+                    # 生成时间戳
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                    # 报告文件名: 项目名_时间戳_Excel空值检查报告.xlsx
+                    report_filename = f"{base_name}_{timestamp}_Excel空值检查报告.xlsx"
+
+                    # 使用配置中的存放位置
+                    from extend.matcher_config import MatcherConfig
+
+                    config = MatcherConfig.load()
+                    output_dir = config.get("storage", {}).get("initial_review")
+                    if output_dir:
+                        output_dir = os.path.abspath(output_dir)
+                        if not os.path.exists(output_dir):
+                            os.makedirs(output_dir, exist_ok=True)
+                    else:
+                        output_dir = "."
+
+                    report_path = os.path.join(output_dir, report_filename)
+
+                    # 生成报告数据
+                    report_data = []
+                    if final_errors:
+                        for error_msg in final_errors:
+                            report_data.append({"检查项": error_msg})
+                    else:
+                        report_data.append({"检查项": "✅ 所有关键列空值检查通过"})
+
+                    # 写入Excel
+                    df_report = pd.DataFrame(report_data)
+                    with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
+                        df_report.to_excel(
+                            writer, index=False, sheet_name="空值检查结果"
+                        )
+
+                except Exception as e:
+                    # 报告生成失败不影响主流程
+                    try:
+                        from utils.runtime_logger import RuntimeLogger
+
+                        RuntimeLogger.log(
+                            f"生成Excel空值检查报告失败: {e}", level="WARN"
+                        )
+                    except:
+                        pass
+
+            return {
+                "is_ok": len(final_errors) == 0,
+                "errors": final_errors,
+                "report_path": report_path,
+            }
         except Exception as e:
-            return {"is_ok": False, "errors": [f"Excel 校验引擎异常 (V3): {str(e)}"]}
+            return {
+                "is_ok": False,
+                "errors": [f"Excel 校验引擎异常 (V3): {str(e)}"],
+                "report_path": None,
+            }
 
     @staticmethod
     def extract_excel_info(file_path):
@@ -2264,6 +2421,8 @@ class DocumentProcessor:
         fuzzy_match=True,
         threshold=0.8,
         progress_callback=None,
+        word_sections_preloaded=None,
+        project_name=None,
     ):
         """
         节点5：层级匹配校验
@@ -2314,7 +2473,17 @@ class DocumentProcessor:
             )
 
             # 准备 Word 结构树日志路径
-            base_name = os.path.splitext(os.path.basename(word_path))[0]
+            # 使用项目名
+            if project_name:
+                clean_name = ReportGenerator._clean_project_name(project_name)
+            elif word_sections_preloaded is not None:
+                clean_name = "项目报告"
+            else:
+                clean_name = ReportGenerator._clean_project_name(word_path)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = f"{clean_name}_{timestamp}"
+
             config = MatcherConfig.load()
             output_dir = config.get("storage", {}).get("initial_review")
             if output_dir:
@@ -2367,12 +2536,41 @@ class DocumentProcessor:
         sheet_name=None,
         fuzzy_match=True,
         threshold=0.8,
+        progress_callback=None,
+        word_sections_preloaded=None,
+        project_name=None,
     ):
         """
         节点6：功能过程校验
         使用 HierarchicalMatcher (简单模式) 校验 Excel [功能过程] 在 Word 中的匹配情况
+        支持文件路径（str）或已加载的 Document 对象作为 word_path
         """
         try:
+            from docx import Document
+
+            # 如果 word_path 是 Document 对象，使用预加载的数据
+            doc = None
+            word_file_path = word_path  # 用于 matcher.match_documents 的参数
+
+            if hasattr(word_path, "paragraphs") and hasattr(word_path, "element"):
+                # 这是一个 Document 对象，使用预加载的数据
+                doc = word_path
+                # 如果有预加载的sections，直接使用；否则重新提取
+                if word_sections_preloaded:
+                    word_content = word_sections_preloaded
+                else:
+                    # 需要从 Document 对象提取内容
+                    word_content = DocumentProcessor.extract_word_structure(doc)
+                # 使用一个占位符文件路径
+                word_file_path = ""
+            else:
+                # 这是一个文件路径
+                if word_sections_preloaded:
+                    word_content = word_sections_preloaded
+                else:
+                    word_content = DocumentProcessor.extract_word_structure(word_path)
+                word_file_path = word_path
+
             # 加载配置
             config = MatcherConfig.load()
             p_config = config.get("process", MatcherConfig.get_defaults()["process"])
@@ -2422,16 +2620,28 @@ class DocumentProcessor:
                 pass
 
             report = matcher.match_documents(
-                word_path,
+                word_file_path,
                 excel_path,
                 sheet_name=target_sheet,
                 header=header_row,
                 column=func_proc_col,
                 full_text_search=True,  # 功能过程通常在正文中
+                word_items_preloaded=(
+                    word_content if isinstance(word_content, list) else None
+                ),
             )
 
             # 保存报告
-            base_name = os.path.splitext(os.path.basename(word_path))[0]
+            if project_name:
+                clean_name = ReportGenerator._clean_project_name(project_name)
+            elif doc is not None or (hasattr(word_path, "paragraphs")):
+                # 如果是 Document 对象，生成一个默认名称
+                clean_name = "word_document"
+            else:
+                clean_name = ReportGenerator._clean_project_name(word_path)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = f"{clean_name}_{timestamp}"
             report_filename = f"{base_name}-功能过程报告.xlsx"
 
             # 使用配置中的存放位置
@@ -2454,7 +2664,13 @@ class DocumentProcessor:
 
     @staticmethod
     def validate_data_movement_types(
-        excel_path, sheet_name=None, header_row=0, func_col=6, move_col=8
+        excel_path,
+        sheet_name=None,
+        header_row=0,
+        func_col=6,
+        move_col=8,
+        progress_callback=None,
+        project_name=None,
     ):
         """
         节点7：功能过程数据移动类型校验
@@ -2585,7 +2801,13 @@ class DocumentProcessor:
                         }
                     )
                     # 确定文件名
-                    base_name = os.path.splitext(os.path.basename(excel_path))[0]
+                    if project_name:
+                        clean_name = ReportGenerator._clean_project_name(project_name)
+                    else:
+                        clean_name = ReportGenerator._clean_project_name(excel_path)
+
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    base_name = f"{clean_name}_{timestamp}"
                     report_filename = f"{base_name}-数据移动类型报告.xlsx"
 
                     # 使用配置中的存放位置

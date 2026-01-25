@@ -371,13 +371,21 @@ class CosmicMainWindow(QMainWindow):
         if hasattr(self, "re_review_task_layout"):
             for i in range(self.re_review_task_layout.count()):
                 item = self.re_review_task_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), ReReviewTaskCard):
+                if (
+                    item
+                    and item.widget()
+                    and isinstance(item.widget(), ReReviewTaskCard)
+                ):
                     item.widget().update_theme_style()
 
         if hasattr(self, "receipt_task_layout"):
             for i in range(self.receipt_task_layout.count()):
                 item = self.receipt_task_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), ReReviewTaskCard):
+                if (
+                    item
+                    and item.widget()
+                    and isinstance(item.widget(), ReReviewTaskCard)
+                ):
                     item.widget().update_theme_style()
 
         # 应用原生标题栏深色模式
@@ -669,63 +677,121 @@ class CosmicMainWindow(QMainWindow):
         # 1. 自动跳转到回单页面 (index 2)
         self.sidebar.on_item_clicked(2)
 
-        # 2. 创建一个任务卡片并插入
-        task_info = {
-            "project_name": data["project_name"],
-            "type": "回单生成",
-            "time": datetime.now().strftime("%H:%M:%S"),
-        }
-        card = ReReviewTaskCard(task_info)
-        # 修改卡片上的按钮文字和状态
-        card.excel1_btn.setText("评估报告(已回写)")
-        card.excel2_btn.setText("评估确认单(Word)")
+        # 检查是否为批量任务
+        is_batch = data.get("is_batch", False)
+        batch_tasks = data.get("tasks", []) if is_batch else [data]
 
-        self.receipt_task_layout.insertWidget(0, card)
+        # 存储卡片以便后续更新 {index: card_widget}
+        card_map = {}
+
+        # 2. 为每个任务创建卡片
+        # 注意：列表是倒序插入，为了保持顺序一致性，我们先生成卡片对象列表，再倒序插入布局
+        new_cards = []
+        for i, task_data in enumerate(batch_tasks):
+            task_info = {
+                "project_name": task_data["project_name"],
+                "type": "回单生成",
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "status_text": "等待处理..." if is_batch and i > 0 else "正在处理...",
+            }
+            card = ReReviewTaskCard(task_info)
+            card.excel1_btn.setText("评估报告(已回写)")
+            card.excel2_btn.setText("评估确认单(Word)")
+            new_cards.append(card)
+            card_map[i] = card
+
+        # 倒序插入布局，这样第一个任务在最上面
+        for card in reversed(new_cards):
+            self.receipt_task_layout.insertWidget(0, card)
 
         from utils.receipt_processor import ReceiptWorker
 
-        project_name = os.path.basename(data.get("eval_report_path", "Receipt"))
-        worker = ReceiptWorker(data, project_name)
+        # 确定项目名称前缀
+        if is_batch:
+            project_base = data.get("project_name", "Batch_Receipts")
+        elif data.get("is_merge"):
+            groups = data.get("file_groups", {})
+            first_group = list(groups.values())[0] if groups else {}
+            report_for_name = first_group.get("eval_report", "Merged")
+            project_base = os.path.basename(report_for_name)
+        else:
+            project_base = os.path.basename(data.get("eval_report_path", "Receipt"))
+
+        # 3. 初始化 Worker (传入整个 data，如果是 batch，worker 会自己处理)
+        worker = ReceiptWorker(data, project_base)
 
         if not hasattr(self, "receipt_workers"):
             self.receipt_workers = []
         self.receipt_workers.append(worker)
 
-        # 3. 连接信号
-        # finished 信号现在返回字典，包含输出路径和统计数据
-        def on_finished(result):
-            if isinstance(result, dict):
+        # 4. 连接信号
+        
+        def on_item_finished(idx, result):
+            if idx in card_map:
+                card = card_map[idx]
+                
+                # Check for error first
+                if result.get("error"):
+                    card.set_error(result["error"])
+                    return
+
                 word_path = result.get("output_path")
                 stats = result.get("stats", {})
-            else:
-                # 后向兼容：如果直接返回字符串路径
-                word_path = result
-                stats = {}
+                excel_reports = result.get("excel_reports", [])
+                
+                report_for_card = excel_reports[0] if excel_reports else None
+                
+                card.set_completed(excel1=report_for_card, excel2=word_path)
+                card.log_label.setText(
+                    f"✅ 生成成功！已保存"
+                )
+                card.task_info["output_dir"] = os.path.dirname(word_path)
+                if stats:
+                    card.update_stats(stats)
+                    # 更新真实项目名称
+                    if isinstance(stats, list):
+                        # 如果是合并任务，stats 是一个列表，取最后一个（汇总）或尝试从列表中找
+                        if stats:
+                            summary = stats[-1]
+                            if summary.get("real_project_name"):
+                                card.update_title(summary["real_project_name"])
+                    elif isinstance(stats, dict) and stats.get("real_project_name"):
+                        card.update_title(stats["real_project_name"])
 
-            card.set_completed(excel1=data["eval_report_path"], excel2=word_path)
-            card.log_label.setText(
-                f"✅ 生成成功！文件已保存至：{os.path.dirname(word_path)}"
-            )
-            # 更新输出目录
-            card.task_info["output_dir"] = os.path.dirname(word_path)
+        worker.item_finished.connect(on_item_finished)
 
-            # 显示统计数据
-            if stats:
-                card.update_stats(stats)
-
-            # 自动化：打开文件夹
-            config = MatcherConfig.load()
-            if config.get("automation", {}).get("auto_open", True):
-                open_directory(os.path.dirname(word_path))
+        # 处理整体完成
+        def on_finished(result):
+            # 如果不是批量模式，这里还需处理单个结果(兼容)
+            if not is_batch:
+                # 单个任务模式下，Worker 只会发 finished 不发 item_finished
+                if 0 in card_map: # 只有一个卡片
+                   on_item_finished(0, result) 
+            
+            # 批量模式全部完成后，可以做一些清理或通知
+             # 自动化：打开文件夹 (取最后一个路径)
+            if isinstance(result, dict) and result.get("output_path"):
+                 word_path = result.get("output_path")
+                 config = MatcherConfig.load()
+                 if config.get("automation", {}).get("auto_open", True):
+                     open_directory(os.path.dirname(word_path))
+            elif is_batch and batch_tasks:
+                 # 批量模式结束，打开第一个任务的目录即可
+                 output_dir = MatcherConfig.load().get("storage", {}).get("receipt")
+                 if output_dir and os.path.exists(output_dir):
+                      if MatcherConfig.load().get("automation", {}).get("auto_open", True):
+                          open_directory(output_dir)
 
         worker.finished.connect(on_finished)
 
         def on_error(msg):
-            card.set_error(msg)
-            card.log_label.setText(f"❌ 失败: {msg}")
-            card.log_label.setStyleSheet(
-                "font-size: 12px; color: #ef4444; margin-top: 2px;"
-            )
+            # 这里简单处理：如果是全局错误，把所有未完成的卡片都设为错误
+            # 但实际上 Worker 内部处理每个 item 异常，不会轻易抛出全局异常
+            # 除非是完全无法启动
+            for card in card_map.values():
+                 # 只有还没完成的显示错误
+                if card.files_widget.isHidden():
+                    card.set_error(msg) 
 
         worker.error.connect(on_error)
         worker.finished.connect(lambda: self.receipt_workers.remove(worker))

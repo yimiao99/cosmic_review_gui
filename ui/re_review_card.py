@@ -26,6 +26,15 @@ class ReReviewTaskCard(QFrame):
         super().showEvent(event)
         self.update_theme_style()
 
+    def update_progress(self, value):
+        """更新进度条"""
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setValue(value)
+            # 如果是中间进度，更新状态文字
+            if 0 < value < 100:
+                if hasattr(self, "log_label"):
+                    self.log_label.setText(f"正在处理... {value}%")
+
     def update_theme_style(self):
         """动态更新主题样式"""
         from PySide6.QtWidgets import QApplication
@@ -196,51 +205,54 @@ class ReReviewTaskCard(QFrame):
         """
         )
 
-        # 为不同的标签设置颜色
-        if hasattr(self, "label_new"):
-            self.label_new.setStyleSheet(
-                f"color: {new_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_new_ratio"):
-            self.label_new_ratio.setStyleSheet(
-                f"color: {new_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_reuse"):
-            self.label_reuse.setStyleSheet(
-                f"color: {reuse_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_reuse_ratio"):
-            self.label_reuse_ratio.setStyleSheet(
-                f"color: {reuse_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_legacy"):
-            self.label_legacy.setStyleSheet(
-                f"color: {legacy_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_legacy_ratio"):
-            self.label_legacy_ratio.setStyleSheet(
-                f"color: {legacy_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_total"):
-            self.label_total.setStyleSheet(
-                f"color: {total_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_total_ratio"):
-            self.label_total_ratio.setStyleSheet(
-                f"color: {total_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_submission"):
-            self.label_submission.setStyleSheet(
-                f"color: {days_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_eval"):
-            self.label_eval.setStyleSheet(
-                f"color: {days_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
-        if hasattr(self, "label_reduction"):
-            self.label_reduction.setStyleSheet(
-                f"color: {days_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
-            )
+        try:
+            # 为不同的标签设置颜色
+            if hasattr(self, "label_new") and self.label_new:
+                self.label_new.setStyleSheet(
+                    f"color: {new_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_new_ratio") and self.label_new_ratio:
+                self.label_new_ratio.setStyleSheet(
+                    f"color: {new_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_reuse") and self.label_reuse:
+                self.label_reuse.setStyleSheet(
+                    f"color: {reuse_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_reuse_ratio") and self.label_reuse_ratio:
+                self.label_reuse_ratio.setStyleSheet(
+                    f"color: {reuse_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_legacy") and self.label_legacy:
+                self.label_legacy.setStyleSheet(
+                    f"color: {legacy_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_legacy_ratio") and self.label_legacy_ratio:
+                self.label_legacy_ratio.setStyleSheet(
+                    f"color: {legacy_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_total") and self.label_total:
+                self.label_total.setStyleSheet(
+                    f"color: {total_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_total_ratio") and self.label_total_ratio:
+                self.label_total_ratio.setStyleSheet(
+                    f"color: {total_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_submission") and self.label_submission:
+                self.label_submission.setStyleSheet(
+                    f"color: {days_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_eval") and self.label_eval:
+                self.label_eval.setStyleSheet(
+                    f"color: {days_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+            if hasattr(self, "label_reduction") and self.label_reduction:
+                self.label_reduction.setStyleSheet(
+                    f"color: {days_color}; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', SimHei, sans-serif;"
+                )
+        except RuntimeError:
+            pass  # 控件可能已被销毁，忽略错误
 
     def setup_ui(self):
         self.setObjectName("ReReviewTaskCard")
@@ -298,6 +310,12 @@ class ReReviewTaskCard(QFrame):
         self.excel2_btn = btn_excel2  # Save for later update
         btn_excel2.clicked.connect(lambda: self.open_file(self.task_info.get("excel2")))
 
+        # 查看日志按钮
+        self.log_btn = QPushButton("查看处理日志")
+        self.log_btn.setProperty("class", "FileBtn")
+        self.log_btn.setCursor(Qt.PointingHandCursor)
+        self.log_btn.clicked.connect(self.open_log)
+
         btn_dir = QPushButton("打开结果目录")
         btn_dir.setObjectName("OpenDirBtn")
         btn_dir.setCursor(Qt.PointingHandCursor)
@@ -307,6 +325,7 @@ class ReReviewTaskCard(QFrame):
 
         files_layout.addWidget(btn_excel1)
         files_layout.addWidget(btn_excel2)
+        files_layout.addWidget(self.log_btn)  # 添加日志按钮
         files_layout.addStretch()
         files_layout.addWidget(btn_dir)
 
@@ -406,6 +425,28 @@ class ReReviewTaskCard(QFrame):
         if not stats:
             return
 
+        # 如果 stats 是列表，说明是合并模式
+        if isinstance(stats, list):
+            # 清空现有统计显示重新构建
+            layout = self.stats_widget.layout()
+            # 移除旧的组件
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            # 为每个子项目添加统计显示
+            for sub_stat in stats:
+                sub_name = sub_stat.get(
+                    "sub_project_name", "合计" if sub_stat.get("is_total") else "子项目"
+                )
+                frame = self._create_mini_stats_frame(sub_stat, sub_name)
+                layout.addWidget(frame)
+
+            # 显示统计卡片
+            self.stats_widget.show()
+            return
+
         # 安全地获取值，处理N/A和转换类型
         def safe_get(val, default="N/A"):
             if val == "N/A" or val is None:
@@ -422,8 +463,20 @@ class ReReviewTaskCard(QFrame):
         legacy_ratio = safe_get(stats.get("legacy_ratio", "0.0%"), "0.0%")
         total_ratio = safe_get(stats.get("total_ratio", "0.0%"), "0.0%")
 
-        submission_days = safe_get(stats.get("submission_days", "0.00"), "0.00")
+        submission_days = safe_get(stats.get("submission_days", "0.0000"), "0.00")
+        if "." in submission_days:
+            try:
+                submission_days = f"{float(submission_days):.2f}"
+            except:
+                pass
+
         eval_days = safe_get(stats.get("eval_days", "0.00"), "0.00")
+        if "." in eval_days:
+            try:
+                eval_days = f"{float(eval_days):.2f}"
+            except:
+                pass
+
         reduction_ratio = safe_get(stats.get("reduction_ratio", "0.00%"), "0.00%")
 
         # 更新标签
@@ -444,36 +497,146 @@ class ReReviewTaskCard(QFrame):
         # 显示统计卡片
         self.stats_widget.show()
 
-    def update_progress(self, value):
-        self.progress_bar.setValue(value)
-        if value >= 100:
-            self.set_completed()
+    def _create_mini_stats_frame(self, stats, title):
+        """为合并模式创建紧凑的统计样式"""
+        frame = QFrame()
+        frame.setObjectName("StatsFrame")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+
+        # 标题
+        title_label = QLabel(f"📍 {title}")
+        title_label.setStyleSheet(
+            "font-weight: bold; font-size: 14px; margin-bottom: 4px;"
+        )
+        layout.addWidget(title_label)
+
+        # 数据行1: 核心FP
+        row1 = QHBoxLayout()
+        row1.addWidget(
+            QLabel(f"新增: {stats.get('new_fp', '0')} ({stats.get('new_ratio', '0%')})")
+        )
+        row1.addWidget(
+            QLabel(
+                f"复用: {stats.get('reuse_fp', '0')} ({stats.get('reuse_ratio', '0%')})"
+            )
+        )
+        row1.addWidget(
+            QLabel(
+                f"利旧: {stats.get('legacy_fp', '0')} ({stats.get('legacy_ratio', '0%')})"
+            )
+        )
+        row1.addStretch()
+        layout.addLayout(row1)
+
+        # 数据行2: 人天
+        row2 = QHBoxLayout()
+
+        try:
+            sub_days = f"{float(stats.get('submission_days', 0)):.2f}"
+        except:
+            sub_days = stats.get("submission_days", "0")
+
+        try:
+            eval_days = f"{float(stats.get('eval_days', 0)):.2f}"
+        except:
+            eval_days = stats.get("eval_days", "0")
+
+        row2.addWidget(QLabel(f"送审人天: {sub_days}"))
+        row2.addWidget(QLabel(f"核定人天: {eval_days}"))
+        row2.addWidget(QLabel(f"核减比例: {stats.get('reduction_ratio', '0%')}"))
+        row2.addStretch()
+        layout.addLayout(row2)
+
+        return frame
 
     def set_completed(self, excel1=None, excel2=None):
         self.progress_bar.hide()
-        self.log_label.hide()  # 隐藏"准备就绪"状态
+        self.log_label.hide()
         self.files_widget.show()
+
+        # 处理 excel1
         if excel1:
             self.task_info["excel1"] = excel1
+            # 如果是列表，我们需要特殊的处理来“逐个打开”
+            if isinstance(excel1, list):
+                self.excel1_btn.setText(f"评估报告({len(excel1)}个)")
+            else:
+                self.excel1_btn.setText("评估报告(已回写)")
+
+        # 处理 excel2
         if excel2:
             self.task_info["excel2"] = excel2
 
-    def set_error(self, error_msg):
-        self.progress_bar.setStyleSheet(
-            "QProgressBar::chunk { background-color: #ef4444; }"
+    def set_error(self, message):
+        """设置错误状态"""
+        self.progress_bar.hide()
+        self.log_label.show()
+        # 限制错误消息长度，避免撑破布局
+        short_msg = str(message)[:100] + ("..." if len(str(message)) > 100 else "")
+        self.log_label.setText(f"❌ 运行报错: {short_msg}")
+        self.log_label.setStyleSheet(
+            "color: #ef4444; font-weight: bold; font-size: 11px;"
         )
-        self.progress_bar.setFormat(f"错误: {error_msg}")
+
+        # 即使报错也显示按钮区域，以便查看日志
+        self.files_widget.show()
+        self.excel1_btn.hide()
+        self.excel2_btn.hide()
+        if hasattr(self, "log_btn"):
+            self.log_btn.show()
+            self.log_btn.setText("查看错误日志")
+            self.log_btn.setStyleSheet(
+                "background-color: #fecaca; color: #b91c1c; border: 1px solid #fca5a5;"
+            )
+
+    def open_log(self):
+        """打开对应的日志文件"""
+        from utils.runtime_logger import RuntimeLogger
+
+        log_path = RuntimeLogger.get_current_log_path()
+        if log_path:
+            self.open_file(log_path)
 
     def open_file(self, path):
-        if not path or not os.path.exists(path):
+        if not path:
+            return
+
+        # 如果是列表，打开文件夹并高亮第一个（或只是打开文件夹）
+        if isinstance(path, list):
+            if not path:
+                return
+            target_path = os.path.dirname(path[0])
+        else:
+            target_path = path
+
+        if not os.path.exists(target_path):
             return
 
         try:
             if os.name == "nt":
-                os.startfile(path)
-            elif os.name == "posix":
-                subprocess.call(["open", path])
+                if isinstance(path, list):
+                    # 打开文件夹
+                    os.startfile(target_path)
+                else:
+                    os.startfile(target_path)
             else:
-                subprocess.call(["xdg-open", path])
+                subprocess.call(
+                    ["open" if os.name == "posix" else "xdg-open", target_path]
+                )
         except Exception as e:
-            print(f"无法打开路径: {path}, 错误: {e}")
+            print(f"无法打开路径: {target_path}, 错误: {e}")
+
+    def update_title(self, title):
+        """更新卡片标题"""
+        if hasattr(self, "findChild"):
+            label = self.findChild(QLabel, "ProjectTitle")
+            if label:
+                label.setText(title)
+                return
+        
+        # Fallback if findChild fails or object structure is known
+        # In setup_ui, we didn't save self.title_label, so use findChild is best
+        # Actually I can save it in setup_ui if needed, but findChild by objectName is standard.
+        pass

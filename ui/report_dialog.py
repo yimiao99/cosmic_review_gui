@@ -182,28 +182,27 @@ class SummaryDialog(QDialog):
         combined_h = not_found_h + mismatched_h
 
         if combined_h:
-            # 按照前缀进行去重
-            prefix_seen = set()
+            seen_types = set()
+
             for item in combined_h:
-                # 优先取“简略描述”，如果层级不匹配则会有两个描述，优先取缺失的
-                d = item.get("简略描述", "")
-                if not d or d == "-":
-                    # 备选取缺失描述或不匹配描述
-                    d = item.get("缺失简略描述", "")
-                    if not d or d == "-":
-                        d = item.get("层级不匹配简略描述", "")
+                # 遍历所有可能的简略描述字段
+                descs = [
+                    item.get("缺失简略描述"),
+                    item.get("层级不匹配简略描述"),
+                    item.get("简略描述"),
+                ]
+                for d in descs:
+                    if d and d != "-":
+                        for part in d.split("\n"):
+                            part = part.strip()
+                            if not part or part == "-":
+                                continue
 
-                if not d or d == "-":
-                    continue
-
-                # Split by \n if multiple descriptions exist (e.g. missing + mismatch)
-                for part in d.split("\n"):
-                    if not part or part == "-":
-                        continue
-                    key = part.split("：")[0] if "：" in part else part
-                    if key not in prefix_seen:
-                        points.append(part)
-                        prefix_seen.add(key)
+                            # 提取错误类型前缀（如 “拆分表一级模块在需求规格书未体现”）
+                            prefix = part.split("：")[0] if "：" in part else part
+                            if prefix not in seen_types:
+                                points.append(part)
+                                seen_types.add(prefix)
 
         # 3. 需求变更规模因子 (Step 4 补全，对齐贴图文案)
         factors = results.get("factor_check", {})
