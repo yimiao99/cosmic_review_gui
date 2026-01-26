@@ -76,17 +76,17 @@ class ReReviewTaskCard(QFrame):
             divider_color = "#334155"
 
             # 不同数据的颜色区分
-            new_color = "#86efac"  # 绿色
-            reuse_color = "#93c5fd"  # 蓝色
-            legacy_color = "#fbbf24"  # 黄色/橙色
-            total_color = "#f1f5f9"  # 默认浅色
-            days_color = "#fca5a5"  # 红色
+            new_color = "#10b981"  # 绿色
+            reuse_color = "#3b82f6"  # 蓝色
+            legacy_color = "#94a3b8"  # 灰/不显色
+            total_color = "#f1f5f9"  
+            days_color = "#ef4444"  # 红色
         else:
             # 浅色模式颜色搭配
-            card_bg = "#f8fafc"
+            card_bg = "#ffffff" # 纯白背景
             card_border = "#cbd5e1"
             text_color = "#0f172a"
-            meta_color = "#475569"
+            meta_color = "#64748b" # 加深
 
             # 按钮样式
             btn_bg = "#ffffff"
@@ -95,12 +95,12 @@ class ReReviewTaskCard(QFrame):
             btn_hover_bg = "#f1f5f9"
 
             # 打开目录按钮
-            dir_btn_bg = "#22d3ee"
-            dir_btn_hover = "#06b6d4"
+            dir_btn_bg = "#0ea5e9"
+            dir_btn_hover = "#0284c7"
 
             border_color = "#cbd5e1"
             progress_bg = "#f1f5f9"
-            progress_chunk = "#22d3ee"
+            progress_chunk = "#0ea5e9"
 
             # 统计卡片样式 - 浅色优化
             stats_bg = "#f1f5f9"
@@ -108,11 +108,11 @@ class ReReviewTaskCard(QFrame):
             divider_color = "#cbd5e1"
 
             # 不同数据的颜色区分
-            new_color = "#16a34a"  # 绿色
-            reuse_color = "#2563eb"  # 蓝色
-            legacy_color = "#d97706"  # 橙色
-            total_color = "#0f172a"  # 深色
-            days_color = "#dc2626"  # 红色
+            new_color = "#10b981"  # 绿色
+            reuse_color = "#3b82f6"  # 蓝色
+            legacy_color = "#64748b"  # 灰色
+            total_color = "#0f172a"  
+            days_color = "#ef4444"  # 红色
 
         self.setStyleSheet(
             f"""

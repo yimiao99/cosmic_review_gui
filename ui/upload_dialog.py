@@ -259,7 +259,7 @@ class UploadAreaWidget(QFrame):
         layout.addWidget(main_text)
 
         # 提示文本
-        hint_text = QLabel("支持 .docx、.xlsx 及 .zip 自动配对")
+        hint_text = QLabel("支持 .docx、.xlsx、.zip及.rar自动配对")
         hint_text.setProperty("class", "task-meta")
         hint_text.setStyleSheet("font-size: 11px;")
         hint_text.setAlignment(Qt.AlignCenter)
@@ -1754,10 +1754,13 @@ class UploadDialog(QDialog):
             "validation_results": [],
         }
 
-        # 发射信号
-        self.task_submitted.emit(task_info)
+        # [优化] 先关闭对话框，立即将控制权交还主界面，避免视觉卡顿
+        self.accept()
 
-        # 记录日志，但不弹窗阻碍流程，直接关闭即可
-        print(f"[OK] 已添加任务：{display_name}")
+        # [NEW] 使用 QTimer.singleShot 异步发射信号，确保对话框已经从主循环中完全退出
+        # 解决“点击开始审核不会马上开始”的阻塞感
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(50, lambda: self.task_submitted.emit(task_info))
 
-        self.accept()  # 关闭对话框，返回主界面查看任务进度
+        # 记录日志
+        print(f"[OK] 已通过信号异步添加任务：{display_name}")

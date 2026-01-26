@@ -64,6 +64,7 @@ class CosmicMainWindow(QMainWindow):
 
         # 2. 右侧垂直容器
         self.right_container = QWidget()
+        self.right_container.setObjectName("RightContainer")
         self.right_layout = QVBoxLayout(self.right_container)
         self.right_layout.setContentsMargins(0, 0, 0, 0)
         self.right_layout.setSpacing(0)
@@ -71,6 +72,7 @@ class CosmicMainWindow(QMainWindow):
 
         # 3. 栈容器 (存放不同页面)
         self.stacked_widget = QStackedWidget()
+        self.stacked_widget.setObjectName("StackedWidget")
         self.right_layout.addWidget(self.stacked_widget)
 
         # 创建页面
@@ -106,15 +108,40 @@ class CosmicMainWindow(QMainWindow):
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(30)
 
-        # 欢迎语
+        # 欢迎语 - 改进设计
+        welcome_frame = QFrame()
+        welcome_frame.setObjectName("WelcomeFrame")
+        welcome_layout = QVBoxLayout(welcome_frame)
+        welcome_layout.setContentsMargins(35, 25, 35, 25)
+        welcome_layout.setSpacing(10)
+
         welcome_label = QLabel("🚀 欢迎使用 Cosmic 智能审核系统")
         welcome_label.setObjectName("WelcomeLabel")
-        welcome_label.setStyleSheet("font-size: 28px; font-weight: bold;")
-        layout.addWidget(welcome_label)
+        welcome_label.setStyleSheet(
+            "font-size: 28px; font-weight: bold; color: #2563eb;"
+        )
+        welcome_label.setProperty("class", "welcome-title")
+
+        # 获取当前时间进行个性化问候
+        current_hour = datetime.now().hour
+        if current_hour < 12:
+            greeting = "上午好!"
+        elif current_hour < 18:
+            greeting = "下午好！"
+        else:
+            greeting = "晚上好！"
+
+        greeting_label = QLabel(greeting)
+        greeting_label.setStyleSheet("font-size: 14px; color: #64748b;")
+        greeting_label.setProperty("class", "greeting-text")
+
+        welcome_layout.addWidget(welcome_label)
+        welcome_layout.addWidget(greeting_label)
+        layout.addWidget(welcome_frame)
 
         # 快捷入口区域
         grid_layout = QHBoxLayout()
-        grid_layout.setSpacing(20)
+        grid_layout.setSpacing(30)
 
         # 存放快捷按钮以便更新主题
         self.shortcut_btns = []
@@ -122,13 +149,12 @@ class CosmicMainWindow(QMainWindow):
         # 1. 业务操作卡片
         biz_group = QFrame()
         biz_group.setObjectName("BizGroup")
-        biz_group.setStyleSheet("background-color: transparent; border: none;")
         biz_layout = QVBoxLayout(biz_group)
-        biz_layout.setContentsMargins(25, 25, 25, 25)
-        biz_layout.setSpacing(15)
+        biz_layout.setContentsMargins(30, 30, 30, 30)
+        biz_layout.setSpacing(16)
 
         biz_title = QLabel("🚀 业务操作")
-        biz_title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        biz_title.setObjectName("SectionTitle")
         biz_layout.addWidget(biz_title)
 
         upload_btn = self._create_shortcut_btn(
@@ -166,13 +192,12 @@ class CosmicMainWindow(QMainWindow):
         # 2. 系统清理卡片
         clean_group = QFrame()
         clean_group.setObjectName("CleanGroup")
-        clean_group.setStyleSheet("background-color: transparent; border: none;")
         clean_layout = QVBoxLayout(clean_group)
-        clean_layout.setContentsMargins(25, 25, 25, 25)
-        clean_layout.setSpacing(15)
+        clean_layout.setContentsMargins(30, 30, 30, 30)
+        clean_layout.setSpacing(16)
 
         clean_title = QLabel("🧹 系统清理")
-        clean_title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        clean_title.setObjectName("SectionTitle")
         clean_layout.addWidget(clean_title)
 
         clean_initial = self._create_shortcut_btn(
@@ -192,27 +217,15 @@ class CosmicMainWindow(QMainWindow):
             "清空临时压缩文件", "#14b8a6", lambda: self.clear_files("extraction")
         )
 
-        all_clear_btn = QPushButton("🔥 一键清空全部文件")
+        all_clear_btn = QPushButton("⚠️ 一键清理全部数据")
         all_clear_btn.setFixedHeight(50)
         all_clear_btn.setCursor(Qt.PointingHandCursor)
-        all_clear_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #ef4444;
-                color: white;
-                border-radius: 8px;
-                font-weight: bold;
-                border: none;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #dc2626;
-            }
-            QPushButton:pressed {
-                background-color: #b91c1c;
-            }
-        """
-        )
+        all_clear_btn.setProperty("class", "ShortcutBtn")
+        all_clear_btn.setProperty("theme_color", "#ef4444")
+        if not hasattr(self, "shortcut_btns"):
+            self.shortcut_btns = []
+        self.shortcut_btns.append(all_clear_btn)
+        self._refresh_shortcut_btn_style(all_clear_btn)
         all_clear_btn.clicked.connect(self.clear_all_files)
 
         clean_layout.addWidget(clean_initial)
@@ -220,10 +233,20 @@ class CosmicMainWindow(QMainWindow):
         clean_layout.addWidget(clean_receipt)
         clean_layout.addWidget(clean_re_review)
         clean_layout.addWidget(clean_temp)
+
+        clean_layout.addSpacing(15)
+
         clean_layout.addWidget(all_clear_btn)
         clean_layout.addStretch()
 
         grid_layout.addWidget(biz_group, 1)
+
+        # 添加分隔线（竖直，中间对齐）
+        # separator = QLabel("|\n" * 20)
+        # separator.setAlignment(Qt.AlignCenter)
+        # separator.setProperty("class", "separator-line")
+        # grid_layout.addWidget(separator, 0)
+
         grid_layout.addWidget(clean_group, 1)
         layout.addLayout(grid_layout)
         layout.addStretch()
@@ -248,53 +271,113 @@ class CosmicMainWindow(QMainWindow):
 
     def _refresh_shortcut_btn_style(self, btn):
         color = btn.property("theme_color")
+        is_red_btn = color == "#ef4444" or color == "#ee0000"
+
         if self.is_dark_mode:
-            # 深色模式：更加扎实的卡片感
-            btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    color: #f3f4f6;
-                    border: 1px solid #374151;
-                    background-color: #1f2937;
-                    border-radius: 10px;
-                    font-size: 14px;
-                    font-weight: 500;
-                    padding: 12px;
-                    text-align: center;
-                }}
-                QPushButton:hover {{
-                    background-color: #374151;
-                    border-color: {color};
-                    border-width: 2px;
-                }}
-                QPushButton:pressed {{
-                    background-color: #111827;
-                }}
-            """
-            )
+            if is_red_btn:
+                # 深色模式下的红色按钮
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        color: #ffffff;
+                        border: 1px solid rgba(239, 68, 68, 0.6);
+                        background-color: #ef4444;
+                        border-radius: 10px;
+                        font-size: 15px;
+                        font-weight: 600;
+                        padding: 14px 16px;
+                        text-align: center;
+                        transition: all 0.3s ease;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #dc2626;
+                        border: 1px solid #991b1b;
+                    }}
+                    QPushButton:pressed {{
+                        background-color: #b91c1c;
+                        transform: scale(0.98);
+                    }}
+                """
+                )
+            else:
+                # 深色模式：半透明卡片效果，带颜色边框
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        color: #e3f2fd;
+                        border: 1px solid rgba(100, 200, 255, 0.4);
+                        background-color: rgba(30, 41, 59, 0.5);
+                        border-radius: 10px;
+                        font-size: 15px;
+                        font-weight: 600;
+                        padding: 14px 16px;
+                        text-align: center;
+                        transition: all 0.3s ease;
+                    }}
+                    QPushButton:hover {{
+                        background-color: rgba(51, 65, 85, 0.8);
+                        border: 1px solid {color};
+                        color: {color};
+                    }}
+                    QPushButton:pressed {{
+                        background-color: rgba(30, 41, 59, 0.8);
+                        transform: scale(0.98);
+                    }}
+                """
+                )
         else:
-            # 浅色模式：经典的卡片投影感
-            btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    color: #1e293b;
-                    border: 1px solid #e2e8f0;
-                    background-color: #ffffff;
-                    border-radius: 10px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    padding: 12px;
-                }}
-                QPushButton:hover {{
-                    border-color: {color};
-                    border-width: 2px;
-                    background-color: #f8fafc;
-                }}
-                QPushButton:pressed {{
-                    background-color: #f1f5f9;
-                }}
-            """
-            )
+            if is_red_btn:
+                # 浅色模式下的红色按钮
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        color: #ffffff;
+                        border: 2px solid #ef4444;
+                        background-color: #ef4444;
+                        border-radius: 12px;
+                        font-size: 16px;
+                        font-weight: 600;
+                        padding: 12px;
+                        text-align: center;
+                        transition: all 0.3s ease;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #dc2626;
+                        border: 2px solid #dc2626;
+                    }}
+                    QPushButton:pressed {{
+                        background-color: #b91c1c;
+                        transform: scale(0.98);
+                    }}
+                """
+                )
+            else:
+                # 浅色模式：现代卡片设计，添加阴影和过渡
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        color: #1e293b;
+                        border: 2px solid #e2e8f0;
+                        background-color: #ffffff;
+                        border-radius: 12px;
+                        font-size: 16px;
+                        font-weight: 600;
+                        padding: 12px;
+                        text-align: center;
+                        transition: all 0.3s ease;
+                    }}
+                    QPushButton:hover {{
+                        border-color: {color};
+                        border-width: 2px;
+                        background-color: #f8fafc;
+                        color: {color};
+                    }}
+                    QPushButton:pressed {{
+                        background-color: #f1f5f9;
+                        transform: scale(0.98);
+                    }}
+                """
+                )
 
     def clear_files(self, storage_key):
         config = MatcherConfig.load()
@@ -445,16 +528,20 @@ class CosmicMainWindow(QMainWindow):
         # 应用原生标题栏深色模式
         apply_dark_title_bar(self, self.is_dark_mode)
 
+        # 更新主题按钮的样式和文字
+        if hasattr(self, "sidebar") and hasattr(self.sidebar, "theme_btn"):
+            self.sidebar._update_theme_btn_style()
+            if self.is_dark_mode:
+                self.sidebar.theme_btn.setText("☀️")
+            else:
+                self.sidebar.theme_btn.setText("🌙")
+
         if self.is_dark_mode:
             if hasattr(self, "theme_btn"):
                 self.theme_btn.setText("☀️ 白天模式")
-            if hasattr(self, "sidebar") and hasattr(self.sidebar, "theme_btn"):
-                self.sidebar.theme_btn.setText("☀️")
         else:
             if hasattr(self, "theme_btn"):
                 self.theme_btn.setText("🌙 深色模式")
-            if hasattr(self, "sidebar") and hasattr(self.sidebar, "theme_btn"):
-                self.sidebar.theme_btn.setText("🌙")
 
     def toggle_theme(self):
         """切换主题"""
@@ -522,9 +609,14 @@ class CosmicMainWindow(QMainWindow):
 
     def add_new_task_and_navigate(self, task_info):
         """添加新任务并跳转到初评页面"""
-        self.add_new_task(task_info)
-        # 自动跳转到初评页面 (index 1)
+        # 先执行跳转，让用户感知到页面切换
         self.sidebar.on_item_clicked(1)
+        # 再异步或者立即添加任务
+        self.add_new_task(task_info)
+        # 强制界面刷新
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.processEvents()
 
     def add_new_task(self, task_info):
         """动态添加新任务卡片，随机取色作为边框"""
@@ -553,7 +645,7 @@ class CosmicMainWindow(QMainWindow):
             # 如果已经有结果（比如重载），则保持原有逻辑
             step1_status = "done"  # 示例简化
 
-        # ✅ 7 个步骤，初始状态大部分为 done (模拟)
+        # ✅ 7 个步骤，恢复原始详细名称
         steps = [
             ("模板校验", "pending"),
             ("空值检查", "pending"),

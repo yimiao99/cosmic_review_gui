@@ -120,12 +120,16 @@ class Sidebar(QFrame):
 
         self.layout.addStretch()
 
-        # 底部 切换主题按钮
+        # 底部 切换主题按钮 - 改进设计
         self.theme_btn = QPushButton("🌙")
-        self.theme_btn.setFixedSize(40, 40)
+        self.theme_btn.setFixedSize(48, 48)
         self.theme_btn.setCursor(Qt.PointingHandCursor)
         self.theme_btn.setObjectName("SidebarThemeBtn")
+        self.theme_btn.setToolTip("点击切换主题 (Light/Dark)")
         self.theme_btn.clicked.connect(self.theme_toggled.emit)
+
+        # 设置主题按钮样式
+        self._update_theme_btn_style()
 
         self.theme_layout = QHBoxLayout()
         self.theme_layout.setContentsMargins(15, 0, 15, 10)
@@ -177,3 +181,59 @@ class Sidebar(QFrame):
 
         # 切换按钮文字或图标
         self.toggle_btn.setText("☰" if self.is_expanded else "▶")
+
+    def _update_theme_btn_style(self):
+        """更新主题按钮样式，根据当前主题模式"""
+        from extend.matcher_config import MatcherConfig
+        
+        config = MatcherConfig.load()
+        is_dark = config.get("theme", {}).get("is_dark", False)
+        
+        if is_dark:
+            # 深色模式：亮色按钮
+            self.theme_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: rgba(102, 204, 255, 0.1);
+                    border: 2px solid #374151;
+                    border-radius: 12px;
+                    font-size: 24px;
+                    color: #66ccff;
+                    padding: 4px;
+                    transition: all 0.3s ease;
+                }
+                QPushButton:hover {
+                    background-color: rgba(102, 204, 255, 0.2);
+                    border-color: #66ccff;
+                    transform: scale(1.1);
+                }
+                QPushButton:pressed {
+                    background-color: rgba(102, 204, 255, 0.15);
+                    transform: scale(0.95);
+                }
+            """
+            )
+        else:
+            # 浅色模式：深色按钮
+            self.theme_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #f1f5f9;
+                    border: 2px solid #e2e8f0;
+                    border-radius: 12px;
+                    font-size: 24px;
+                    color: #0f172a;
+                    padding: 4px;
+                    transition: all 0.3s ease;
+                }
+                QPushButton:hover {
+                    background-color: #dbeafe;
+                    border-color: #2563eb;
+                    transform: scale(1.1);
+                }
+                QPushButton:pressed {
+                    background-color: #e0f2fe;
+                    transform: scale(0.95);
+                }
+            """
+            )

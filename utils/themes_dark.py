@@ -29,6 +29,9 @@ def get_dark_theme_stylesheet():
     QWidget#CentralWidget {{
         background-color: {bg_main};
     }}
+    QWidget#RightContainer, QStackedWidget#StackedWidget {{
+        background-color: {bg_main};
+    }}
     QWidget#HomePage {{
         background-color: transparent;
     }}
@@ -49,6 +52,14 @@ def get_dark_theme_stylesheet():
     QLabel[class="task-meta"], QLabel#SectionDesc {{
         color: #9ca3af;
     }}
+    QFrame#WelcomeFrame {{
+        background-color: rgba(102, 204, 255, 0.1);
+        border: 2px solid #1e293b;
+        border-radius: 16px;
+    }}
+    QLabel[class="greeting-text"] {{
+        color: #cbd5e1;
+    }}
     QScrollArea {{
         background: transparent;
         border: none;
@@ -63,9 +74,20 @@ def get_dark_theme_stylesheet():
         background: transparent;
         border: 1px solid {border_color};
     }}
-    QFrame#BizGroup, QFrame#CleanGroup {{
-        background-color: transparent;
-        border: none;
+    QFrame#BizGroup {{
+        background-color: rgba(20, 33, 61, 0.8);
+        border: 2px solid rgba(102, 204, 255, 0.5);
+        border-radius: 16px;
+    }}
+    QFrame#CleanGroup {{
+        background-color: rgba(20, 33, 61, 0.8);
+        border: 2px solid rgba(102, 204, 255, 0.5);
+        border-radius: 16px;
+    }}
+    QLabel#SectionTitle {{
+        font-size: 18px;
+        font-weight: bold;
+        color: #ffffff;
     }}
     QFrame#UploadArea {{
         border: 3px dashed #4b5563;
@@ -348,15 +370,22 @@ def get_dark_theme_stylesheet():
         background: #374151;
     }}
     QPushButton#SidebarThemeBtn {{
-        background: transparent;
-        border: none;
-        font-size: 22px;
-        color: #9ca3af;
-        border-radius: 5px;
-        padding: 0px;
+        background-color: rgba(102, 204, 255, 0.1);
+        border: 2px solid #374151;
+        border-radius: 12px;
+        font-size: 24px;
+        color: #66ccff;
+        padding: 4px;
+        transition: all 0.3s ease;
     }}
     QPushButton#SidebarThemeBtn:hover {{
-        background: #374151;
+        background-color: rgba(102, 204, 255, 0.2);
+        border-color: #66ccff;
+        transform: scale(1.1);
+    }}
+    QPushButton#SidebarThemeBtn:pressed {{
+        background-color: rgba(102, 204, 255, 0.15);
+        transform: scale(0.95);
     }}
     QFrame#SidebarItem {{
         background: transparent;
@@ -413,11 +442,25 @@ def get_dark_theme_stylesheet():
         border: none;
     }}
     QWidget#HomePage {{
-        background-color: {bg_main};
+        background: linear-gradient(135deg, #0f172a 0%, #1a1f3a 50%, #2d1b4e 100%);
     }}
-    QWidget#HomePage QFrame {{
-        background-color: {bg_header};
-        border: 1px solid {border_color};
+    QFrame#WelcomeFrame {{
+        background-color: rgba(102, 204, 255, 0.15);
+        border: 2px solid rgba(102, 204, 255, 0.6);
+        border-radius: 16px;
+    }}
+    QLabel[class="greeting-text"] {{
+        color: #cbd5e1;
+    }}
+    QFrame#BizGroup {{
+        background-color: rgba(20, 33, 61, 0.8);
+        border: 2px solid rgba(102, 204, 255, 0.5);
+        border-radius: 16px;
+    }}
+    QFrame#CleanGroup {{
+        background-color: rgba(20, 33, 61, 0.8);
+        border: 2px solid rgba(102, 204, 255, 0.5);
+        border-radius: 16px;
     }}
     QWidget#HomePage QLabel {{
         border: none;
@@ -452,5 +495,21 @@ def get_dark_theme_stylesheet():
         background: #66ccff;
         border-color: #66ccff;
         image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjQiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBvbHlsaW5lIHBvaW50cz0iMjAgNiA5IDE3IDQgMTIiPjwvcG9seWxpbmU+PC9zdmc+);
+    }}
+
+    QLabel[class="separator-line"] {{
+        color: #4b5563;
+        font-size: 18px;
+        padding: 0px 10px;
+        line-height: 1.2;
+        min-width: 20px;
+        max-width: 20px;
+    }}
+
+    QFrame[class="separator"] {{
+        background-color: #374151;
+        border: none;
+        max-width: 1px;
+        min-width: 1px;
     }}
 """

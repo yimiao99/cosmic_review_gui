@@ -15,6 +15,7 @@ if project_root not in sys.path:
 from extend.hierarchical_matcher import HierarchicalMatcher
 from extend.matcher_config import MatcherConfig
 from utils.report_generator import ReportGenerator
+from utils.runtime_logger import RuntimeLogger  # ✅ 新增导入
 from datetime import datetime
 import json
 
@@ -1725,7 +1726,7 @@ class DocumentProcessor:
             return 0
 
     @staticmethod
-    def check_adjustment_factors_in_word(file_path):
+    def check_adjustment_factors_in_word(file_path, target_sections=None):
         """
         深度扫描 Word 正文段落及表格中的附加值调整因子 (Node 4)
         支持文件路径（str）或已加载的 Document 对象
@@ -1734,6 +1735,8 @@ class DocumentProcessor:
         doc = None
         try:
             from docx import Document
+            from docx.text.paragraph import Paragraph
+            from docx.table import Table
             import re
 
             # 检查是否已是 Document 对象
@@ -1741,14 +1744,16 @@ class DocumentProcessor:
                 # 这是一个 Document 对象
                 doc = file_path
             else:
+                # 兼容 pathlib.Path
+                file_path_str = str(file_path)
                 # .doc 转换处理
-                if file_path.lower().endswith(".doc"):
-                    temp_docx = DocumentProcessor._convert_doc_to_docx(file_path)
+                if file_path_str.lower().endswith(".doc"):
+                    temp_docx = DocumentProcessor._convert_doc_to_docx(file_path_str)
                     if not temp_docx:
                         return {}
                     doc_to_read = temp_docx
                 else:
-                    doc_to_read = file_path
+                    doc_to_read = file_path_str
 
                 doc = Document(doc_to_read)
 
@@ -1796,42 +1801,135 @@ class DocumentProcessor:
                 },
             }
 
+            # --- [NEW] 范围限定逻辑：基于目录树精确定位起止路标 ---
+            adj_parent_found = False
+            scale_info = None
+            quality_info = None
+
+            RuntimeLogger.log(f"   [Node 4] 开始附加值因子提取 (Word)，提供目录节点数: {len(target_sections) if target_sections else 0}")
+
+            if target_sections is None:
+                # 兜底：如果没传，内部提取一次
+                target_sections = DocumentProcessor.extract_word_structure(doc)
+
+            for s in target_sections:
+                t = (s.get("title") or "").strip()
+                # [极简匹配] 只要包含关键字就锁定章节
+                t_lower = t.lower()
+                if any(x in t_lower for x in ["附加值", "调整因子", "value factors"]):
+                    adj_parent_found = True
+                    RuntimeLogger.log(f"   [Node 4] 找到章节父级: {t}")
+                if any(x in t_lower for x in ["规模因子", "scale factor"]) and not scale_info:
+                    scale_info = s
+                if any(x in t_lower for x in ["质量及特性", "特性需求", "quality requirement", "factor description"]) and not quality_info:
+                    quality_info = s
+
+            # 收集特定范围内的块
+            scale_paras, scale_tables = [], []
+            quality_paras, quality_tables = [], []
+            quality_keys = ["distributed", "performance", "reliability", "multiple_sites"]
+            
+            if adj_parent_found:
+                active_category = None
+                scale_lvl = scale_info.get("level") if scale_info else 0
+                quality_lvl = quality_info.get("level") if quality_info else 0
+                
+                RuntimeLogger.log(f"   [Node 4] 章节定位: 规模因子段={scale_info.get('title') if scale_info else '未找到'}, 质量因子段={quality_info.get('title') if quality_info else '未找到'}")
+
+                # 利用 doc.element.body.iterchildren() 确保正文和表格在收集时保持原始顺序
+                for child in doc.element.body.iterchildren():
+                    is_p = child.tag.endswith('p')
+                    is_tbl = child.tag.endswith('tbl')
+                    
+                    if is_p:
+                        p_obj = Paragraph(child, doc)
+                        txt = p_obj.text.strip()
+                        # 仅对较短的段落尝试进行目录节点匹配（标题通常不长）
+                        if txt and len(txt) < 200:
+                            # [核心优化]：去除编号后与目录树进行比对锁定位置
+                            tmp_txt = txt.lstrip('. \t\n\r')
+                            clean_txt = re.sub(r'^[^\w\u4e00-\u9fa5]*\d+[\.\d\s、-]*', '', tmp_txt).strip()
+                            matched_s = None
+                            
+                            if clean_txt and len(clean_txt) < 50:
+                                for s in target_sections:
+                                    s_title = (s.get("title") or "").strip()
+                                    tmp_s = s_title.lstrip('. \t\n\r')
+                                    core_s = re.sub(r'^[^\w\u4e00-\u9fa5]*\d+[\.\d\s、-]*', '', tmp_s).strip()
+                                    
+                                    if core_s and (clean_txt == core_s or (len(clean_txt) > 3 and clean_txt in core_s)):
+                                        matched_s = s
+                                        break
+                        
+                            if matched_s:
+                                last_cat = active_category
+                                # [FIX] 只有匹配到非目标节点时，才执行退出逻辑
+                                if matched_s == scale_info:
+                                    active_category = "scale"
+                                elif matched_s == quality_info:
+                                    active_category = "quality"
+                                else:
+                                    # 层级退出逻辑：进入了与目标章节同级或更高级的其他章节
+                                    if active_category == "scale" and matched_s["level"] <= scale_lvl:
+                                        active_category = None
+                                    elif active_category == "quality" and matched_s["level"] <= quality_lvl:
+                                        active_category = None
+                                
+                                if last_cat != active_category:
+                                    RuntimeLogger.log(f"   [Node 4] 扫描区域切换: {last_cat} -> {active_category} (由此段触发: '{txt[:30]}...')")
+                    
+                    # 收集数据块：此处不受 200 字符限制，只要在 active_category 范围内即收集
+                    if active_category == "scale":
+                        if is_p: scale_paras.append(Paragraph(child, doc))
+                        elif is_tbl: scale_tables.append(Table(child, doc))
+                    elif active_category == "quality":
+                        if is_p: quality_paras.append(Paragraph(child, doc))
+                        elif is_tbl: quality_tables.append(Table(child, doc))
+            
+            RuntimeLogger.log(f"   [Node 4] 收集区域统计: 规模因子({len(scale_paras)}段/{len(scale_tables)}表), 质量因子({len(quality_paras)}段/{len(quality_tables)}表)")
+
             # 1. 扫描段落 (正文文本查找)
             # 兼容带引号(中文/英文)和不带引号的情况
             # 扩充句式：支持 "目前属于", "按照", "处于", "属于" 等更多描述方式
             scale_regex = re.compile(
-                r'(?:目前属于|按照|处于|属于)\s*[“""]?(.+?)[”""]?\s*阶段'
+                r'(?:目前属于|按照|处于|属于|编制为)\s*[“"「「]?\s*(结算|预算|概算|匡算)\s*[”"」」]?\s*阶段'
             )
 
-            for para in doc.paragraphs:
+            # A. 扫描规模因子段落 (限定范围)
+            for para in scale_paras:
                 text = para.text.strip()
                 if not text:
                     continue
 
                 # A. 检查规模因子 (特定句式优先)
-                # 句式: "本项目目前属于“结算”阶段" 或 "本期项目按照结算阶段编制"
                 m_scale = scale_regex.search(text)
                 if m_scale:
+                    val = m_scale.group(1).strip()
                     factors["scale"]["found_in_text"] = True
-                    factors["scale"]["text_value"] = m_scale.group(1).strip()
-                    factors["scale"]["value"] = factors["scale"]["text_value"]
+                    factors["scale"]["text_value"] = val
+                    factors["scale"]["value"] = val
+                    RuntimeLogger.log(f"   [Node 4] 提取到规模因子(文): {val} (来自: '{text}')")
 
                 # 备用：传统模糊匹配 (只要段落包含“规模变更因子”关键词即可)
-                elif ("规模变更因子" in text or "规模因子" in text) and not factors[
-                    "scale"
-                ]["text_value"]:
-                    factors["scale"]["found_in_text"] = True
-                    # 匹配常见的类型词
+                elif ("规模变更因子" in text or "规模因子" in text) and not factors["scale"]["text_value"]:
                     m = re.search(r"(结算|预算|概算|匡算)", text)
                     if m:
-                        factors["scale"]["text_value"] = m.group(1)
-                        factors["scale"]["value"] = factors["scale"]["text_value"]
+                        val = m.group(1)
+                        factors["scale"]["found_in_text"] = True
+                        factors["scale"]["text_value"] = val
+                        factors["scale"]["value"] = val
+                        RuntimeLogger.log(f"   [Node 4] 提取到规模因子(文-模糊): {val}")
 
-                # B. 检查四项质量特性 (段落形式: "分布式处理: -1")
+            # B. 扫描质量特性段落 (限定范围)
+            for para in quality_paras:
+                text = para.text.strip()
+                if not text:
+                    continue
+
                 # 特殊情况处理：如果整段话就是“无”，且没有具体因子关键字，可能意味着所有因子均为默认
-                if text.strip() == "无" and "质量" not in text:
-                    # 标记一个全局标识，稍后如果发现因子缺失，可以用这个补全
+                if text == "无" or text == "无要求":
                     factors["_global_default"] = True
+                    RuntimeLogger.log(f"   [Node 4] 发现全局默认(无)标记")
 
                 for key in [
                     "distributed",
@@ -1839,18 +1937,16 @@ class DocumentProcessor:
                     "reliability",
                     "multiple_sites",
                 ]:
-                    if factors[key]["text_value"] is not None:
-                        continue  # 已找到则跳过
+                    if factors[key]["text_value"] is not None and factors[key]["text_value"] != "已识别标题":
+                        continue  # 已有实质性结果则跳过
 
                     kw = factors[key]["name"]
-                    # 优化：限制匹配深度，避免在长段落的描述文字中误匹配到关键词
-                    # 要求关键词出现在行首（允许有编号）或者紧随冒号
+                    # 优化：支持带冒号的提取
                     is_key_match = False
-                    if text.startswith(kw) or re.search(
-                        rf"^[\d\s\.、\(\)（）]*{kw}", text
-                    ):
-                        # 如果匹配到了，确保它看起来像是一个标题或项的开始（后面有冒号或文本较短）
-                        if re.search(rf"{kw}[:：\s]", text) or len(text) < 20:
+                    # 匹配格式：关键字 + 符号 + 内容
+                    if text.startswith(kw) or re.search(rf"^[\d\s\.、\(\)（）]*{kw}", text):
+                        # 确保是标题行（后面带冒号或整体较短）
+                        if re.search(rf"{kw}[:：\s]", text) or len(text) < 30:
                             is_key_match = True
 
                     if is_key_match:
@@ -1859,209 +1955,178 @@ class DocumentProcessor:
                             continue
 
                         factors[key]["found_in_text"] = True
+                        RuntimeLogger.log(f"   [Node 4] 匹配到因子关键字: {kw} (原文: '{text[:40]}...')")
 
-                        # 1. 查找明确的数字 (优先)
-                        m_num = re.search(rf"{kw}.*?(-?\d+(\.\d+)?)", text)
+                        # 1. 查找明确的数字 (仅限 -1, 0, 1，且排除 7*24 干扰)
+                        # 查找格式：关键字 + 冒号/空格 + (-1/0/1)
+                        m_num = re.search(rf"{kw}.*?[:：]\s*(-?1|0)\b(?![\*x])", text)
                         if m_num:
-                            factors[key]["text_value"] = m_num.group(1)
-                            factors[key]["value"] = factors[key]["text_value"]
+                            val = m_num.group(1)
+                            # [USER UPDATE] 0 视为 1 (有描述)
+                            final_val = "1" if val == "0" else val
+                            factors[key]["text_value"] = final_val
+                            factors[key]["value"] = final_val
+                            RuntimeLogger.log(f"   [Node 4] 提取到明确分值 {kw}: {val} -> 归一化为 {final_val}")
                             continue
 
-                        # 2. 查找明确的“空”字 (视为异常)
-                        # 例如: "分布式处理: 空"
+                        # 2. 查找明确的“空”字
                         if re.search(rf"{kw}.*?[:：]?\s*空", text):
-                            factors[key]["text_value"] = "空"  # 显式赋值“空”字符串
+                            factors[key]["text_value"] = "空"
                             factors[key]["value"] = "空"
                             continue
 
-                        # 3. 查找特定的“负向/默认”语句 (只有特定文字才视为 -1)
+                        # 3-5. 查找预定义短语
                         negative_phrases = {
-                            "distributed": ["没有明示对分布式处理的需求事项"],
-                            "performance": [
-                                "没有明示对性能的特别需求事项或仅需提供基本性能"
-                            ],
-                            "reliability": [
-                                "没有明示对可靠性的特别需求事项或仅需提供基本的可靠性"
-                            ],
-                            "multiple_sites": ["在相同用途的硬件或软件环境下运行"],
+                            "distributed": ["没有明示对分布式处理的需求事项", "无分布式", "无说明", "-1"],
+                            "performance": ["没有明示对性能的特别需求事项或仅需提供基本性能", "仅需提供基本性能", "无明示对性能的特别需求", "-1"],
+                            "reliability": ["没有明示对可靠性的特别需求事项或仅需提供基本的可靠性", "仅需提供基本的可靠性", "无明示对可靠性的特别需求", "-1"],
+                            "multiple_sites": ["在相同用途的硬件或软件环境下运行", "同一套硬件环境", "无站点差异", "-1"],
                         }
-
-                        # 4. 查找特定的“正常/中性”语句 (视为 0)
-                        neutral_phrases = {
-                            "distributed": [
-                                "通过网络进行客户端/服务器及网络基础应用分布式处理和传输"
-                            ],
-                            "performance": [
-                                "应答时间或处理率对高峰时间或所有业务时间来说都很重要",
-                                "存在对连动系统结束处理时间的限制",
-                            ],
-                            "reliability": ["发生故障时带来较多不便或经济损失"],
-                            "multiple_sites": ["在用途类似的硬件或软件环境下运行"],
-                        }
-
-                        # 5. 查找特定的“增强/高要求”语句 (视为 1)
-                        positive_phrases = {
-                            "distributed": [
-                                "通过特别的设计保证在多个服务器及处理器上同时相互执行应用中的处理功能"
-                            ],
-                            "performance": [
-                                "要求设计阶段开始进行性能分析",
-                                "在设计、开发阶段使用分析工具",
-                            ],
-                            "reliability": ["发生故障时造成重大经济损失或有生命危害"],
-                            "multiple_sites": ["在不同用途的硬件或软件环境下运行"],
-                        }
+                        
+                        # 补充通用的否定词 (作为备选)
+                        gen_neg = ["无", "不涉及", "无要求", "不适用", "为空", "此项无"]
 
                         found_val = None
-                        for p in negative_phrases.get(key, []):
-                            if p in text:
-                                found_val = "-1"
+                        # [新逻辑] 首先假设找到了(因为进到了关键字段落)
+                        factors[key]["found_in_text"] = True 
+
+                        # 检查具体的负面完整长短语 (高优先级)
+                        is_neg_matched = False
+                        for phrase in negative_phrases.get(key, []):
+                            if phrase in text:
+                                is_neg_matched = True
                                 break
-                        if not found_val:
-                            for p in neutral_phrases.get(key, []):
-                                if p in text:
-                                    found_val = "0"
-                                    break
-                        if not found_val:
-                            for p in positive_phrases.get(key, []):
-                                if p in text:
-                                    found_val = "1"
+                        
+                        # 检查通用的单字/短词否定
+                        if not is_neg_matched:
+                            # 匹配格式：关键字 + 冒号 + 否定词 (例如 "性能: 无")
+                            for gn in gen_neg:
+                                if re.search(rf"{kw}[:：\s]*{gn}\b", text) or (len(text) < 15 and gn in text):
+                                    is_neg_matched = True
                                     break
 
-                        if found_val:
-                            factors[key]["text_value"] = found_val
-                            factors[key]["value"] = found_val
+                        if is_neg_matched:
+                            factors[key]["found_in_text"] = False
+                            factors[key]["text_value"] = "缺失" # 标记为业务上的缺失
+                            factors[key]["value"] = "-1"
+                            found_val = "-1"
+                            RuntimeLogger.log(f"   [Node 4] 匹配到负向/缺失描述: {kw} -> 视为缺失(-1)")
                             continue
 
-                        # 6. 兜底：如果前面都没匹配到，但有冒号加内容，提取内容
-                        # 例如: "分布式处理：高要求"
-                        # 避免提取到空字符串
-                        m_gen = re.search(rf"{kw}.*?[:：]\s*(\S+)", text)
-                        if m_gen:
-                            val_str = m_gen.group(1).strip()
-                            # 再次过滤一下，如果提取出来的是“空”或“无”，修正一下
-                            if val_str in ["空", "无"]:
-                                factors[key]["text_value"] = "空"
-                            else:
-                                factors[key]["text_value"] = val_str
-                            factors[key]["value"] = factors[key]["text_value"]
+                        # [USER UPDATE] 文字有写就是1 (只要不是否定描述，且进了这个段落，就视为1)
+                        # 排除掉仅含标题名称的极短行
+                        clean_text = text.strip()
+                        if len(clean_text) > len(kw) + 1:
+                            factors[key]["found_in_text"] = True
+                            factors[key]["text_value"] = "1"
+                            factors[key]["value"] = "1"
+                            RuntimeLogger.log(f"   [Node 4] 文字存在有效描述 -> 判定为 1")
+                            continue
                         else:
-                            # 即使冒号后面暂时没有紧跟文字，只要匹配到了标题行，也标记为已找到
-                            # 避免被判定为“文字缺失”，因为详细描述可能在后续段落
+                            # 如果确实很短，可能是个标题占位，记录但暂不设为1，等后续段落内容
+                            factors[key]["found_in_text"] = True
                             factors[key]["text_value"] = "已识别标题"
-                            if not factors[key].get("value"):
-                                factors[key]["value"] = "已识别标题"
+                            # 暂不设 factors[key]["value"]，让后面的段落内容来填充
+                
+                # 针对“均一致”或“均设置为-1”等合并描述
+                if ("均" in text or "都" in text) and any(kw in text for kw in ["分布式", "性能", "可靠", "站点"]):
+                    target_val = None
+                    # [USER UPDATE] 遵循您的最新逻辑：只有明确提到 -1 或 “无” 才当做 -1
+                    # 提到 0、1 或 “基本” 均视为有描述 (1)
+                    if any(x in text for x in ["-1", "无"]): 
+                        target_val = "-1"
+                    elif any(x in text for x in ["0", "1", "基本", "一致", "有"]): 
+                        target_val = "1"
+                    
+                    if target_val:
+                        for key in ["distributed", "performance", "reliability", "multiple_sites"]:
+                            # 只有在还没被具体识别的情况下，才用合并描述兜底
+                            if not factors[key].get("value") or factors[key]["value"] == "-1":
+                                factors[key]["found_in_text"] = (target_val == "1")
+                                factors[key]["text_value"] = target_val
+                                factors[key]["value"] = target_val
+                        RuntimeLogger.log(f"   [Node 4] 识别合并描述: '{text}' -> 统一设置为 {target_val}")
 
-            # 如果检测到了 global "无"，且因子未提取到值，则设为默认
-            if factors.get("_global_default"):
-                for key in [
-                    "distributed",
-                    "performance",
-                    "reliability",
-                    "multiple_sites",
-                ]:
-                    if not factors[key].get("text_value"):
-                        factors[key]["found_in_text"] = True
-                        factors[key]["text_value"] = "无"
-                        if not factors[key]["value"]:
-                            factors[key]["value"] = "无"
-
-            # 2. 扫描表格 (如果段落没找全，或者表格更准确，优先以表格为准)
-            # 很多文档会将质量特性放在表格中: [特性名] [描述] [分值]
-            # 同时也检查表格中的“需求变更规模因子”
-            quality_keys = [
-                "distributed",
-                "performance",
-                "reliability",
-                "multiple_sites",
-            ]
-
-            for table in doc.tables:
-                # 检查表头
-                is_scale_table = False
-                is_quality_ref_table = False
-                try:
-                    header_text = "".join([c.text for c in table.rows[0].cells])
-                    if "需求变更规模因子" in header_text:
-                        is_scale_table = True
-                    # 如果表头包含“判断标准”，说明这是参考表，不应作为提取来源
-                    if "质量及特性" in header_text or "判断标准" in header_text:
-                        is_quality_ref_table = True
-                except:
-                    pass
-
-                # 规模因子参考表判定
+            # 2. 扫描表格
+            target_tables = scale_tables + quality_tables
+            for table in target_tables:
                 all_table_text = "".join([c.text for r in table.rows for c in r.cells])
-                found_phases = set(re.findall(r"(结算|预算|概算|匡算)", all_table_text))
-                is_reference_table = len(found_phases) > 1 or is_quality_ref_table
+                
+                # [NEW] 过滤掉模板参考表 (即图1、图2)
+                # 仅当表格内容极其像模板定义时才跳过
+                if any(x in all_table_text for x in ["判断标准", "没有明示", "分值标识", "附加值因素"]) or \
+                   ("2.00" in all_table_text and "1.50" in all_table_text and "1.26" in all_table_text):
+                    RuntimeLogger.log("   [Node 4] 跳过表格: 判定为参考模版参考表(图1/图2)。")
+                    continue
+
+                # 规模因子表检测
+                is_scale_table = False
+                if "需求变更规模因子" in all_table_text or "变更规模因子" in all_table_text:
+                    is_scale_table = True
+                
+                # 特性表检测
+                found_count = sum(1 for qk in quality_keys if factors[qk]["name"] in all_table_text)
+                if not is_scale_table and found_count < 1:
+                    continue
+
+                RuntimeLogger.log(f"   [Node 4] 扫描表格: 行数={len(table.rows)}, 命中因子数={found_count}")
 
                 for row in table.rows:
-                    # 获取行内所有文本
                     cells_text = [cell.text.strip() for cell in row.cells]
                     row_content = " ".join(cells_text)
 
-                    # 优先检查规模因子表格
                     if is_scale_table and not factors["scale"]["table_value"]:
-                        if is_reference_table:
-                            continue
-
-                        # 扫描行内容寻找关键词
                         m = re.search(r"(结算|预算|概算|匡算)", row_content)
                         if m:
+                            val = m.group(1)
                             factors["scale"]["found_in_table"] = True
-                            factors["scale"]["table_value"] = m.group(1)
-                            if not factors["scale"]["value"]:
-                                factors["scale"]["value"] = m.group(1)
-
-                    if is_quality_ref_table:
-                        continue  # 跳过质量特性参考表
+                            factors["scale"]["table_value"] = val
+                            if not factors["scale"]["value"]: factors["scale"]["value"] = val
+                            RuntimeLogger.log(f"   [Node 4] 表格提取规模因子: {val}")
 
                     for key in quality_keys:
                         kw = factors[key]["name"]
-
-                        # 优化：仅在行前两个单元格中搜索关键字
                         if any(kw in str(c) for c in cells_text[:2]):
                             factors[key]["found_in_table"] = True
-
-                            # 尝试获取分值单元格
+                            
                             possible_val = None
                             for cell_text in reversed(cells_text):
-                                clean_cell = (
-                                    cell_text.strip()
-                                    .replace(" ", "")
-                                    .replace("\n", "")
-                                    .replace("\r", "")
-                                )
-                                if clean_cell and re.match(
-                                    r"^-?\d+(\.\d+)?$", clean_cell
-                                ):
+                                clean_cell = cell_text.strip().replace(" ", "").replace("\n", "").replace("\r", "")
+                                if re.match(r"^-?\d+(\.\d+)?$", clean_cell):
                                     possible_val = clean_cell
                                     break
-
+                            
                             if possible_val:
+                                # [USER UPDATE] 表格中 1 和 0 都视为 1，只有 -1 维持 -1
+                                if possible_val in ["0", "1"]:
+                                    possible_val = "1"
+                                
                                 factors[key]["table_value"] = possible_val
                                 factors[key]["value"] = possible_val
+                                RuntimeLogger.log(f"   [Node 4] 表格提取 {kw}: {possible_val}")
                             else:
                                 # 尝试通过描述（判断标准列）自动计算
+                                # [USER UPDATE] 遵循：基本需求描述在该规则下视为 1（因为表格 0 当成 1）
+                                # 但“没有明示”这种描述依然维持 -1
                                 standards = {
                                     "distributed": {
                                         "-1": "没有明示对分布式处理的需求事项",
-                                        "0": "通过网络进行客户端/服务器及网络基础应用分布式处理和传输",
+                                        "1_basic": "通过网络进行客户端/服务器及网络基础应用分布式处理和传输",
                                         "1": "通过特别的设计保证在多个服务器及处理器上同时相互执行应用中的处理功能",
                                     },
                                     "performance": {
                                         "-1": "没有明示对性能的特别需求事项或仅需提供基本性能",
-                                        "0": "存在对连动系统结束处理时间的限制",
+                                        "1_basic": "存在对连动系统结束处理时间的限制",
                                         "1": "要求设计阶段开始进行性能分析",
                                     },
                                     "reliability": {
                                         "-1": "没有明示对可靠性的特别需求事项或仅需提供基本的可靠性",
-                                        "0": "发生故障时带来较多不便或经济损失",
+                                        "1_basic": "发生故障时带来较多不便或经济损失",
                                         "1": "发生故障时造成重大经济损失或有生命危害",
                                     },
                                     "multiple_sites": {
                                         "-1": "在相同用途的硬件或软件环境下运行",
-                                        "0": "在用途类似的硬件或软件环境下运行",
+                                        "1_basic": "在用途类似的硬件或软件环境下运行",
                                         "1": "在不同用途的硬件或软件环境下运行",
                                     },
                                 }
@@ -2073,23 +2138,50 @@ class DocumentProcessor:
                                 )
                                 for val, desc in standards.get(key, {}).items():
                                     if desc.replace(" ", "") in normalized_row:
-                                        factors[key]["table_value"] = val
-                                        factors[key]["value"] = val
+                                        # 将内部标记的 1_basic 统一为 1
+                                        final_val = "1" if "1_basic" in val else val
+                                        factors[key]["table_value"] = final_val
+                                        factors[key]["value"] = final_val
+                                        RuntimeLogger.log(f"   [Node 4] 表格描述提取 {kw}: {final_val}")
+                                        break
+                                        RuntimeLogger.log(f"   [Node 4] 表格描述提取 {kw}: {val}")
                                         break
 
                                 # 如果仍然没提取到具体的数值，但找到了关键字，标记一下
                                 if not factors[key].get("table_value"):
                                     factors[key]["table_value"] = "已勾选"
 
+            # 3. 结果汇总与一致性检查
+            for key in quality_keys:
+                f = factors[key]
+                f["is_found"] = f["found_in_text"] or f["found_in_table"]
+                f["consistency_warn"] = False
+                
+                # [核心判定] 文字与表格取值不一致
+                v_text = str(f.get("text_value") or "").strip()
+                v_table = str(f.get("table_value") or "").strip()
+                
+                # 统一取值归一化：将 "1", "0", "-1" 以外的文本也参与比对
+                # 如果一方有具体分值，另一方是“缺失”，则视为不一致
+                if f["found_in_text"] != f["found_in_table"]:
+                    f["consistency_warn"] = True
+                    f["consistency_msg"] = "文字与表格存在缺失项不匹配"
+                elif f["found_in_text"] and f["found_in_table"]:
+                    if v_text != v_table:
+                        f["consistency_warn"] = True
+                        f["consistency_msg"] = f"文字({v_text})与表格({v_table})分值不符"
+
             # 补齐默认值
             for key in quality_keys:
-                if not factors[key].get("value"):
-                    # 默认设为 -1，标记为缺失（除非有全局无）
-                    factors[key]["value"] = "-1"
-                    if not factors[key].get("text_value"):
+                if not factors[key].get("value") or factors[key]["value"] == "缺失":
+                    # 只有当彻底没有任何发现时，才设为 -1 缺失
+                    if not factors[key]["is_found"]:
+                        factors[key]["value"] = "-1"
                         factors[key]["text_value"] = "缺失"
-                    if not factors[key].get("table_value"):
                         factors[key]["table_value"] = "缺失"
+                    else:
+                        # [USER UPDATE] 只要有一个地方找到了非否定内容，且不是明确的 -1，就视为 1 (显著需求)
+                        factors[key]["value"] = "1"
 
             return factors
         except Exception as e:

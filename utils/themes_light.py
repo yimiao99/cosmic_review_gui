@@ -26,6 +26,9 @@ def get_light_theme_stylesheet():
     QWidget#CentralWidget {{
         background-color: {bg_main};
     }}
+    QWidget#RightContainer, QStackedWidget#StackedWidget {{
+        background-color: {bg_main};
+    }}
     QWidget#HomePage {{
         background-color: transparent;
     }}
@@ -45,7 +48,15 @@ def get_light_theme_stylesheet():
         color: #000000;
     }}
     QLabel#WelcomeLabel {{
-        color: #000000;
+        color: #2563eb;
+    }}
+    QFrame#WelcomeFrame {{
+        background-color: rgba(37, 99, 235, 0.12);
+        border: 2px solid rgba(37, 99, 235, 0.6);
+        border-radius: 16px;
+    }}
+    QLabel[class="greeting-text"] {{
+        color: #64748b;
     }}
     /* 增加 ShortcutBtn 选择器支持 */
     QPushButton[class="ShortcutBtn"] {{
@@ -68,8 +79,14 @@ def get_light_theme_stylesheet():
         border: 1px solid {border_color};
     }}
     QFrame#BizGroup, QFrame#CleanGroup {{
-        background-color: transparent;
-        border: none;
+        background-color: rgba(255, 255, 255, 0.7);
+        border: 2px solid rgba(37, 99, 235, 0.5);
+        border-radius: 16px;
+    }}
+    QLabel#SectionTitle {{
+        font-size: 18px;
+        font-weight: bold;
+        color: #1e293b;
     }}
     QFrame#UploadArea {{
         border: 3px dashed #cbd5e1;
@@ -254,15 +271,22 @@ def get_light_theme_stylesheet():
         background: #eff2f7;
     }}
     QPushButton#SidebarThemeBtn {{
-        background: transparent;
-        border: none;
-        font-size: 22px;
-        color: #64748b;
-        border-radius: 5px;
-        padding: 0px;
+        background: #f1f5f9;
+        border: 2px solid #e2e8f0;
+        border-radius: 12px;
+        font-size: 24px;
+        color: #0f172a;
+        padding: 4px;
+        transition: all 0.3s ease;
     }}
     QPushButton#SidebarThemeBtn:hover {{
-        background: #eff2f7;
+        background: #dbeafe;
+        border-color: #2563eb;
+        transform: scale(1.1);
+    }}
+    QPushButton#SidebarThemeBtn:pressed {{
+        background: #e0f2fe;
+        transform: scale(0.95);
     }}
     QComboBox::drop-down, QDateEdit::drop-down {{
         subcontrol-origin: padding;
@@ -374,5 +398,21 @@ def get_light_theme_stylesheet():
         background: #66ccff;
         border-color: #66ccff;
         image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSI1IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==);
+    }}
+
+    QLabel[class="separator-line"] {{
+        color: #cbd5e1;
+        font-size: 18px;
+        padding: 0px 10px;
+        line-height: 1.2;
+        min-width: 20px;
+        max-width: 20px;
+    }}
+
+    QFrame[class="separator"] {{
+        background-color: #e2e8f0;
+        border: none;
+        max-width: 1px;
+        min-width: 1px;
     }}
 """
