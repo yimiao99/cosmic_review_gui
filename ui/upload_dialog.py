@@ -1760,6 +1760,7 @@ class UploadDialog(QDialog):
         # [NEW] 使用 QTimer.singleShot 异步发射信号，确保对话框已经从主循环中完全退出
         # 解决“点击开始审核不会马上开始”的阻塞感
         from PySide6.QtCore import QTimer
+
         QTimer.singleShot(50, lambda: self.task_submitted.emit(task_info))
 
         # 记录日志

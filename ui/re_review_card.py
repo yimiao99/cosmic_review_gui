@@ -79,14 +79,14 @@ class ReReviewTaskCard(QFrame):
             new_color = "#10b981"  # 绿色
             reuse_color = "#3b82f6"  # 蓝色
             legacy_color = "#94a3b8"  # 灰/不显色
-            total_color = "#f1f5f9"  
+            total_color = "#f1f5f9"
             days_color = "#ef4444"  # 红色
         else:
             # 浅色模式颜色搭配
-            card_bg = "#ffffff" # 纯白背景
+            card_bg = "#ffffff"  # 纯白背景
             card_border = "#cbd5e1"
             text_color = "#0f172a"
-            meta_color = "#64748b" # 加深
+            meta_color = "#64748b"  # 加深
 
             # 按钮样式
             btn_bg = "#ffffff"
@@ -111,7 +111,7 @@ class ReReviewTaskCard(QFrame):
             new_color = "#10b981"  # 绿色
             reuse_color = "#3b82f6"  # 蓝色
             legacy_color = "#64748b"  # 灰色
-            total_color = "#0f172a"  
+            total_color = "#0f172a"
             days_color = "#ef4444"  # 红色
 
         self.setStyleSheet(
@@ -635,7 +635,7 @@ class ReReviewTaskCard(QFrame):
             if label:
                 label.setText(title)
                 return
-        
+
         # Fallback if findChild fails or object structure is known
         # In setup_ui, we didn't save self.title_label, so use findChild is best
         # Actually I can save it in setup_ui if needed, but findChild by objectName is standard.

@@ -30,10 +30,10 @@ class StepCircle(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        
+
         # 居中绘制
         rect = QRectF(4, 4, 36, 36)
-        
+
         # 核心颜色定义 (移除黄色/警告，统一归为异常/红色)
         color_map = {
             "pending": QColor("#94a3b8"),
@@ -43,13 +43,15 @@ class StepCircle(QWidget):
             "skipped": QColor("#64748b"),
             "fail": QColor("#ef4444"),
             "error": QColor("#ef4444"),
-            "warn": QColor("#ef4444") # 警告与错误均显示红色
+            "warn": QColor("#ef4444"),  # 警告与错误均显示红色
         }
-        
+
         main_color = color_map.get(self.status, color_map["pending"])
-        
+
         # 背景圆环 (玻璃感/空心感)
-        painter.setPen(QPen(QColor(main_color.red(), main_color.green(), main_color.blue(), 40), 3))
+        painter.setPen(
+            QPen(QColor(main_color.red(), main_color.green(), main_color.blue(), 40), 3)
+        )
         painter.drawEllipse(rect)
 
         if self.status in ["done", "finished", "fail", "warn", "skipped"]:
@@ -57,13 +59,16 @@ class StepCircle(QWidget):
             painter.setBrush(main_color)
             painter.setPen(Qt.NoPen)
             painter.drawEllipse(rect)
-            
+
             # 中心文字/图标
             text = str(self.step_num)
-            if self.status in ["done", "finished"]: text = "✓"
-            elif self.status in ["fail", "warn"]: text = "✕" # 警告也显示 X
-            elif self.status == "skipped": text = "-"
-            
+            if self.status in ["done", "finished"]:
+                text = "✓"
+            elif self.status in ["fail", "warn"]:
+                text = "✕"  # 警告也显示 X
+            elif self.status == "skipped":
+                text = "-"
+
             painter.setPen(QPen(Qt.white, 2.5))
             font = QFont("Microsoft YaHei UI", 11, QFont.Bold)
             painter.setFont(font)
@@ -71,7 +76,9 @@ class StepCircle(QWidget):
         else:
             # 等待或处理中
             # 绘制一层极淡的底色增加体积感
-            painter.setBrush(QColor(main_color.red(), main_color.green(), main_color.blue(), 15))
+            painter.setBrush(
+                QColor(main_color.red(), main_color.green(), main_color.blue(), 15)
+            )
             painter.setPen(Qt.NoPen)
             painter.drawEllipse(rect)
 
@@ -80,7 +87,7 @@ class StepCircle(QWidget):
                 painter.setPen(QPen(main_color, 4, Qt.SolidLine, Qt.RoundCap))
                 span_angle = -int(self.progress * 3.6 * 16)
                 painter.drawArc(rect, 90 * 16, span_angle)
-            
+
             # 中心数字
             painter.setPen(QPen(main_color, 2))
             font = QFont("Segoe UI", 11, QFont.DemiBold)
@@ -90,12 +97,13 @@ class StepCircle(QWidget):
 
 class StepLine(QWidget):
     """动态连接线进度条"""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.progress = 0 # 0 to 100
+        self.progress = 0  # 0 to 100
         self.setMinimumWidth(20)
         self.setFixedHeight(44)
-        
+
         # 动画相关
         self._glow_timer = QTimer(self)
         self._glow_timer.timeout.connect(self.update)
@@ -115,9 +123,10 @@ class StepLine(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        
+
         # 预加载主题色
         from extend.matcher_config import MatcherConfig
+
         config = MatcherConfig.load()
         is_dark = config.get("theme", {}).get("is_dark", False)
 
@@ -126,22 +135,25 @@ class StepLine(QWidget):
         # 因此我们需要在绘制时向下偏移 10px。
         y_offset = 10
         y = self.height() / 2 + y_offset
-        
+
         h = 6
-        line_rect = QRectF(0, y - h/2, self.width(), h)
-        
+        line_rect = QRectF(0, y - h / 2, self.width(), h)
+
         # 1. 绘制背景线 (槽)
-        bg_color = QColor(255, 255, 255, 30) if is_dark else QColor(0, 0, 0, 60) # 加深 Light Mode 背景槽，增强对比度
+        bg_color = (
+            QColor(255, 255, 255, 30) if is_dark else QColor(0, 0, 0, 60)
+        )  # 加深 Light Mode 背景槽，增强对比度
         painter.setBrush(bg_color)
         painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(line_rect, h/2, h/2)
-        
+        painter.drawRoundedRect(line_rect, h / 2, h / 2)
+
         # 2. 绘制进度填充
         if self.progress > 0:
             from PySide6.QtGui import QLinearGradient
+
             fill_width = (self.progress / 100.0) * self.width()
-            fill_rect = QRectF(0, y - h/2, fill_width, h)
-            
+            fill_rect = QRectF(0, y - h / 2, fill_width, h)
+
             if self.progress >= 100:
                 # 完成色：翠绿色渐变 (统一使用 #10b981)
                 grad = QLinearGradient(fill_rect.left(), 0, fill_rect.right(), 0)
@@ -151,20 +163,22 @@ class StepLine(QWidget):
                 # 进行色：科技蓝渐变，带流动能量感
                 self._glow_step = (self._glow_step + 1) % 40
                 shift = self._glow_step / 40.0
-                
+
                 grad = QLinearGradient(fill_rect.left(), 0, fill_rect.right(), 0)
                 grad.setColorAt(max(0, shift - 0.3), QColor("#3b82f6"))
                 grad.setColorAt(shift, QColor("#93c5fd"))
                 grad.setColorAt(min(1, shift + 0.3), QColor("#3b82f6"))
 
             painter.setBrush(grad)
-            painter.drawRoundedRect(fill_rect, h/2, h/2)
-            
+            painter.drawRoundedRect(fill_rect, h / 2, h / 2)
+
             # 3. 发光效果 (能量核流过感)
             if self.progress < 100:
                 glow_color = QColor(147, 197, 253, 60)
                 painter.setBrush(glow_color)
                 painter.drawRoundedRect(fill_rect.adjusted(-1, -1, 1, 1), h, h)
+
+
 class StepNode(QWidget):
     """单个步骤节点 (支持分离点击)"""
 
@@ -212,8 +226,9 @@ class StepNode(QWidget):
 
         # 优化文字颜色与对比度 (Light/Dark Mode)
         from extend.matcher_config import MatcherConfig
+
         is_dark = MatcherConfig.load().get("theme", {}).get("is_dark", False)
-        
+
         if status in ["done", "finished"]:
             text_color = "#10b981"
         elif status in ["fail", "error", "warn"]:
@@ -222,16 +237,18 @@ class StepNode(QWidget):
             text_color = "#3b82f6"
         else:
             text_color = "#475569" if not is_dark else "#94a3b8"
-            
-        self.label_widget.setStyleSheet(f"""
+
+        self.label_widget.setStyleSheet(
+            f"""
             QLabel {{
-                font-family: 'Microsoft YaHei UI'; 
-                font-size: 11px; 
-                font-weight: 600; 
+                font-family: 'Microsoft YaHei UI';
+                font-size: 11px;
+                font-weight: 600;
                 line-height: 1.2;
                 color: {text_color};
             }}
-        """)
+        """
+        )
 
         self.circle.update()
         self.update()
@@ -295,7 +312,7 @@ class StepsWidget(QWidget):
 
         container_layout = QHBoxLayout(self.container)
         container_layout.setSpacing(0)
-        container_layout.setContentsMargins(20, 0, 20, 0) # 左右留白增加呼吸感
+        container_layout.setContentsMargins(20, 0, 20, 0)  # 左右留白增加呼吸感
 
         self.step_nodes = []
         self.step_lines = []
@@ -316,16 +333,17 @@ class StepsWidget(QWidget):
     def set_total_progress(self, total_val):
         """基于全局 0-100 的百分比更新所有线段和节点状态"""
         num_lines = len(self.step_lines)
-        if num_lines == 0: return
+        if num_lines == 0:
+            return
 
         # 增加容错：如果接近 100，直接设为 100
-        if total_val >= 99.8: 
+        if total_val >= 99.8:
             total_val = 100.0
 
         # 采用与 ValidationWorker 任务分配点一致的非线性分段 (优化权重：给耗时长的步骤 [模板/层级/过程] 更多空间)
         # 1->2 (30%), 2->3 (3%), 3->4 (3%), 4->5 (3%), 5->6 (31%), 6->7 (25%)
         breakpoints = [0, 30, 33, 36, 39, 70, 95]
-        
+
         for i, line in enumerate(self.step_lines):
             if i >= len(breakpoints) - 1:
                 # 兜底处理：如果线段多于断点，剩下的平分 96-100
@@ -333,8 +351,8 @@ class StepsWidget(QWidget):
                 end_progress = 100
             else:
                 start_progress = breakpoints[i]
-                end_progress = breakpoints[i+1]
-            
+                end_progress = breakpoints[i + 1]
+
             if total_val >= end_progress:
                 line.set_progress(100)
             elif total_val <= start_progress:
@@ -342,13 +360,15 @@ class StepsWidget(QWidget):
             else:
                 # 在区间内
                 span = end_progress - start_progress
-                if span <= 0: span = 1
+                if span <= 0:
+                    span = 1
                 local_p = (total_val - start_progress) / span * 100
                 line.set_progress(local_p)
 
     def update_theme_style(self):
         """同步全局主题色"""
         from extend.matcher_config import MatcherConfig
+
         is_dark = MatcherConfig.load().get("theme", {}).get("is_dark", False)
 
         # 彻底移除底色，采用全透明设计，消除用户所谓的“顽固底色”
@@ -360,7 +380,7 @@ class StepsWidget(QWidget):
         # 刷新所有圆圈和文字的状态颜色
         if hasattr(self, "step_nodes"):
             for node in self.step_nodes:
-                node.update_status(node.status) # 触发颜色与对比度重算
+                node.update_status(node.status)  # 触发颜色与对比度重算
 
     def set_step_status(self, step_num, status):
         """更新指定步骤的状态 (1-indexed)"""

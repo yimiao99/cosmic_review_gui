@@ -185,10 +185,10 @@ class Sidebar(QFrame):
     def _update_theme_btn_style(self):
         """更新主题按钮样式，根据当前主题模式"""
         from extend.matcher_config import MatcherConfig
-        
+
         config = MatcherConfig.load()
         is_dark = config.get("theme", {}).get("is_dark", False)
-        
+
         if is_dark:
             # 深色模式：亮色按钮
             self.theme_btn.setStyleSheet(
