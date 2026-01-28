@@ -19,6 +19,7 @@ import shutil
 import traceback  # 用于打印更详细的错误信息
 import pythoncom
 from fuzzywuzzy import fuzz
+from collections import Counter
 
 # Import win32com.client for .doc to .docx conversion
 # 尝试导入 pywin32 库，如果失败则设置标志位
@@ -207,7 +208,7 @@ class HierarchicalMatcher:
     def extract_word_content(
         self,
         word_file: str,
-        mode: str = "flat",
+        mode: str = "stable",
         progress_callback=None,
         full_text_search: bool = False,
     ) -> List[Dict]:
@@ -216,12 +217,18 @@ class HierarchicalMatcher:
 
         Args:
             word_file: 文件路径
-            mode: 'flat' (简单列表) 或 'hierarchical' (层级字典)
+            mode: 'flat' (简单列表) 或 'hierarchical' (层级字典) 或 'stable' (稳定大纲提取，默认)
             progress_callback: 进度回调 (percent, message)
             full_text_search: 是否提取全文 (仅在 flat 模式下有效)
         """
         if progress_callback:
             progress_callback(5, "正在打开 Word 文档...")
+
+        # 默认使用 stable 模式，优先使用稳定大纲提取
+        if mode == "stable":
+            if progress_callback:
+                progress_callback(10, "使用稳定大纲提取模式...")
+            return self.extract_word_outline_as_hierarchy(word_file)
 
         doc, processed_path, is_temp = self._open_word_doc(word_file)
 
@@ -334,6 +341,333 @@ class HierarchicalMatcher:
         except:
             return None
 
+    def extract_outline_from_docx_object(self, doc) -> Dict:
+        """
+        从已加载的 docx Document 对象中提取大纲（基于 OutlineLevel）
+        这是一个补充方法，用于处理已经加载的 Document 对象
+        比 extract_word_outline_stable 更快，因为不需要通过 COM 接口重新打开
+
+        Args:
+            doc: python-docx 的 Document 对象
+
+        Returns:
+            层级字典: {"level1": [...], "level2": [...], "level3": [...], "all_items": [...]}
+        """
+        hierarchy = {"level1": [], "level2": [], "level3": [], "all_items": []}
+
+        if not doc:
+            return hierarchy
+
+        try:
+            outline_items = []
+
+            # 从 Document 对象的段落中提取 OutlineLevel
+            for para in doc.paragraphs:
+                try:
+                    text = para.text.strip()
+                    if not text:
+                        continue
+
+                    # 尝试提取编号（从文本中用正则提取）
+                    # 支持格式：1、1.1、1.1.1、[1.1.1]、(1.1.1) 等
+                    import re
+
+                    num_match = re.match(
+                        r"^\s*[\[\(]?(\d+([\.\．]\d+)*?)[\]\)]?[\.\．\s]*", text
+                    )
+                    if num_match:
+                        num_text = num_match.group(1).replace("．", ".").rstrip(".")
+                        # 清理标题中的编号前缀
+                        title = text[num_match.end() :].strip()
+                        if not title:
+                            title = text  # 如果没有剩余文本，使用原始文本
+                        # 从编号推断层级：1 -> L1, 1.1 -> L2, 1.1.1 -> L3
+                        inferred_level = num_text.count(".") + 1
+                    else:
+                        num_text = ""
+                        title = text
+                        inferred_level = 9  # 无编号默认为正文
+
+                    # 获取 OutlineLevel（直接从 XML 中获取）
+                    outline_level = None
+                    try:
+                        pPr = para._element.pPr
+                        if pPr is not None and pPr.outlineLvl is not None:
+                            outline_level = (
+                                int(pPr.outlineLvl.val) + 1
+                            )  # OutlineLevel 从 0 开始，调整为 1 开始
+                    except:
+                        pass
+
+                    # 优先使用 OutlineLevel，如果不存在则使用从编号推断的层级
+                    level = (
+                        outline_level if outline_level is not None else inferred_level
+                    )
+
+                    if level < 1 or level > 9:
+                        continue
+
+                    outline_items.append(
+                        {"number": num_text, "title": title, "level": level}
+                    )
+
+                except Exception:
+                    continue
+
+            # 转换为层级字典格式
+            for idx, item in enumerate(outline_items):
+                hierarchy_item = {
+                    "number": item["number"],
+                    "original": (
+                        f"{item['number']} {item['title']}"
+                        if item["number"]
+                        else item["title"]
+                    ),
+                    "display": item["title"],
+                    "cleaned": item["title"],
+                    "text": item["title"],
+                    "title": item["title"],  # 添加 title 字段，兼容 validate_template
+                    "content": "",  # 添加 content 字段，兼容 validate_template
+                    "depth": item["level"],
+                    "level": item["level"],  # 整数格式，用于缩进计算
+                    "order": idx,
+                    "in_toc": True,
+                }
+
+                hierarchy["all_items"].append(hierarchy_item)
+
+                if item["level"] == 1:
+                    hierarchy["level1"].append(hierarchy_item)
+                elif item["level"] == 2:
+                    hierarchy["level2"].append(hierarchy_item)
+                else:
+                    hierarchy["level3"].append(hierarchy_item)
+
+            if outline_items:
+                print(
+                    f"  [OK] 从 Document 对象提取完成：共获取 {len(outline_items)} 项"
+                )
+                return hierarchy
+
+        except Exception as e:
+            print(f"  [WARN] 从 Document 对象提取失败: {e}")
+
+        return hierarchy
+
+    def extract_word_outline_stable(
+        self, doc_path: str, max_level: int = 9
+    ) -> List[Tuple[str, str, int]]:
+        """
+        稳定提取 Word 大纲（OutlineLevel 1~9），使用 win32com 的 COM 接口
+
+        Args:
+            doc_path: Word 文档路径 (.doc 或 .docx)
+            max_level: 最大大纲级别（默认 1-9）
+
+        Returns:
+            列表，每项为 [编号, 标题, 级别] 的三元组
+            例如: [['4', '第四章', 1], ['4.1', '4.1 小节', 2], ...]
+        """
+        pythoncom.CoInitialize()
+        word = None
+        doc = None
+
+        try:
+            doc_path = os.path.abspath(doc_path)
+            if not os.path.exists(doc_path):
+                raise FileNotFoundError(f"文件不存在: {doc_path}")
+
+            # 修改：使用已导入的 win32 模块
+            word = win32.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0
+            word.AutomationSecurity = 3
+
+            doc = word.Documents.Open(
+                FileName=doc_path,
+                ReadOnly=True,
+                AddToRecentFiles=False,
+                ConfirmConversions=False,
+            )
+
+            # 关键：确保文档处于大纲视图以保证 ListString 可用
+            try:
+                word.ActiveWindow.View.Type = 3  # wdOutlineView
+            except:
+                pass
+
+            if doc is None:
+                raise RuntimeError("文档对象为空")
+
+            # 自动编号计数器 (1-9 级)
+            auto_counters = [0] * 10
+            result = []
+
+            # 使用迭代器遍历（最稳定）
+            for para in doc.Paragraphs:
+                try:
+                    text = para.Range.Text
+                    if not text or text.strip() in ["\r", "\x07", ""]:
+                        continue
+
+                    outline_level = para.OutlineLevel
+                    # 关键：1-9级是大纲标题，10级是正文
+                    if outline_level < 1 or outline_level > 9:
+                        continue
+                    if outline_level > max_level:
+                        continue
+
+                    # 更新自动编号计数器
+                    auto_counters[outline_level] += 1
+                    for i in range(outline_level + 1, 10):
+                        auto_counters[i] = 0
+                    # 生成默认结构编号
+                    struct_num = ".".join(
+                        str(auto_counters[i]) for i in range(1, outline_level + 1)
+                    )
+
+                    # 获取原生编号 (ListString 只对自动编号有效)
+                    try:
+                        list_text = str(para.Range.ListFormat.ListString).strip()
+                    except:
+                        list_text = ""
+
+                    # 清理标题文本
+                    title = text.strip().replace("\r", "").replace("\x07", "")
+
+                    # --- 改进：同时处理自动编号和手动编号 ---
+                    num_clean = ""
+                    if list_text:
+                        # 对于自动编号
+                        num_clean = (
+                            list_text.rstrip(".")
+                            .rstrip(")")
+                            .rstrip("：")
+                            .rstrip(":")
+                            .strip()
+                        )
+                        # 如果标题内容重复包含了编号，则去掉
+                        if title.startswith(list_text):
+                            title = title[len(list_text) :].strip()
+                        elif num_clean and title.startswith(num_clean):
+                            # 处理 ListString="1." 但 title="1 标题" 的情况
+                            title = re.sub(
+                                rf"^{re.escape(num_clean)}[\s\.．、]*", "", title
+                            ).strip()
+                    else:
+                        # 对于手动编号，尝试从标题开头提取
+                        # 解析类似于 "4.1.1 需求说明" 或 "1. 系统概况"
+                        manual_num_match = re.match(r"^([\d\.]+)\s*(.*)", title)
+                        if manual_num_match:
+                            num_candidate = manual_num_match.group(1).rstrip(".")
+                            # 验证通过：含有点的序列通常是编号，或是单级短编号
+                            if "." in num_candidate or len(num_candidate) <= 2:
+                                num_clean = num_candidate
+                                title = manual_num_match.group(2).strip()
+                        else:
+                            # 尝试匹配中文编号，如 "一、", "第一章", "1.1" (全角)
+                            cn_num_match = re.match(
+                                r"^([第]?[一二三四五六七八九十百]+[章节]?|[0-9\.]+)[、\.\s]",
+                                title,
+                            )
+                            if cn_num_match:
+                                num_clean = cn_num_match.group(1).strip()
+                                title = title[cn_num_match.end() :].strip()
+
+                    # 如果没提取到编号，使用生成的结构化编号补全
+                    if not num_clean:
+                        num_clean = struct_num
+                    else:
+                        # 同步计数器
+                        try:
+                            parts = [
+                                int(p) for p in num_clean.split(".") if p.isdigit()
+                            ]
+                            if len(parts) == outline_level:
+                                for i, p_val in enumerate(parts):
+                                    auto_counters[i + 1] = p_val
+                        except:
+                            pass
+
+                    if title:
+                        result.append([num_clean, title, outline_level])
+
+                except pythoncom.com_error:
+                    continue
+                except Exception:
+                    continue
+
+            return result
+
+        finally:
+            if doc:
+                try:
+                    doc.Close(False)
+                except:
+                    pass
+            if word:
+                try:
+                    word.Quit()
+                except:
+                    pass
+            pythoncom.CoUninitialize()
+
+    def extract_word_outline_as_hierarchy(
+        self, doc_path: str, max_level: int = 9
+    ) -> Dict:
+        """
+        基于稳定大纲提取，转换为层级字典格式
+
+        Args:
+            doc_path: Word 文档路径
+            max_level: 最大大纲级别
+
+        Returns:
+            层级字典: {"level1": [...], "level2": [...], "level3": [...], "all_items": [...]}
+        """
+        hierarchy = {"level1": [], "level2": [], "level3": [], "all_items": []}
+
+        try:
+            outline = self.extract_word_outline_stable(doc_path, max_level)
+
+            if not outline:
+                print("  [!] 警告: 未从大纲提取到任何项")
+                return hierarchy
+
+            for idx, (num, title, level) in enumerate(outline):
+                item = {
+                    "number": num,
+                    "original": f"{num} {title}" if num else title,
+                    "display": title,
+                    "cleaned": title,
+                    "text": title,
+                    "title": title,  # 关键：添加 title 字段以兼容 SimilarityChecker
+                    "depth": level,
+                    "order": idx,
+                    "in_toc": True,
+                    "level": level,  # 整数格式，用于层级计算
+                }
+
+                hierarchy["all_items"].append(item)
+
+                # 按级别分类
+                if level == 1:
+                    hierarchy["level1"].append(item)
+                elif level == 2:
+                    hierarchy["level2"].append(item)
+                elif level >= 3:
+                    hierarchy["level3"].append(item)
+
+            print(f"  [OK] 稳定大纲提取完成：共获取 {len(outline)} 项")
+            return hierarchy
+
+        except Exception as e:
+            print(f"  [ERROR] 稳定大纲提取失败: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return hierarchy
+
     def _extract_word_flat(
         self, doc, progress_callback=None, full_text_search: bool = False
     ) -> List[Dict]:
@@ -434,23 +768,35 @@ class HierarchicalMatcher:
     ) -> Dict:
         """
         全量对齐智能提取引擎：
-        直接利用 DocumentProcessor 提取的目录树结构及其自动识别的编号层级。
-        不再使用传统的大纲计数策略或显式匹配策略。
+        优先使用稳定的 Word 大纲提取（基于 OutlineLevel），
+        确保完整准确的层级结构识别。
         """
-        hierarchy = {"level1": [], "level2": [], "level3": []}
+        hierarchy = {"level1": [], "level2": [], "level3": [], "all_items": []}
 
+        if progress_callback:
+            progress_callback(20, "优先使用稳定大纲提取模式...")
+
+        # 【优先路径】优先使用稳定大纲提取方法（基于 Word COM 接口的 OutlineLevel）
+        if word_file:
+            try:
+                print("  [INFO] 优先使用稳定大纲提取引擎 (基于 OutlineLevel)...")
+                return self.extract_word_outline_as_hierarchy(word_file)
+            except Exception as e:
+                print(f"  [WARN] 稳定提取失败: {e}")
+                print(f"  [INFO] 降级使用 DocumentProcessor 备用方案...")
+
+        # 【备用路径】如果稳定提取失败或未提供 word_file，则使用 DocumentProcessor
         # 优先使用已打开的 doc 对象，如果没有则尝试 word_file 路径
         target_to_extract = doc if doc is not None else word_file
 
         if not target_to_extract:
-            print("  [!] 警告: 未提供文档对象或路径，无法使用智能提取引擎")
+            print("  [!] 警告: 未提供文档对象或路径，无法使用任何提取引擎")
             return hierarchy
 
         try:
             from utils.document_processor import DocumentProcessor
 
-            # 获取已经过 DocumentProcessor（模拟 WPS 智能目录）识别处理后的完整结构
-            # DocumentProcessor.extract_word_structure 已支持传入路径或 doc 对象
+            # 使用 DocumentProcessor 作为备用方案
             sections = DocumentProcessor.extract_word_structure(target_to_extract)
 
             if not sections:
@@ -485,16 +831,21 @@ class HierarchicalMatcher:
                     "display": clean_t,
                     "cleaned": clean_t,
                     "text": clean_t,
+                    "title": clean_t,  # 添加 title 字段兼容 SimilarityChecker
                     "depth": lvl,
                     "order": i,  # 添加原始顺序索引
                     "in_toc": True,  # 智能提取的都是目录层级项
-                    "level": "heading",  # 标记为标题样式
+                    "level": lvl,  # 整数格式，用于层级计算
                 }
+
+                # 【修复】保存所有项到 all_items，用于保持完整的层级结构
+                hierarchy["all_items"].append(item)
 
                 # 层级映射 (对接 WPS 智能树)：
                 # Word Level 1 (4.) -> Excel 一级模块
                 # Word Level 2 (4.1.) -> Excel 二级模块
                 # Word Level 3/4/5 (4.1.1.) -> Excel 三级模块
+                # 【向下兼容】仍然添加到分类桶，但对第3层及以上归入 level3
                 if lvl == 1:
                     hierarchy["level1"].append(item)
                     item_count += 1
@@ -516,22 +867,6 @@ class HierarchicalMatcher:
 
             traceback.print_exc()
             return hierarchy
-
-        # 移除原有的 _extract_word_hierarchical 的其余冗余实现（Strategy 1 & 2）
-
-        # --- DEBUG ---
-        print("\n[DEBUG] 最终提取结果统计:")
-        print(f"  Level 1 (Word H2): {len(final_hierarchy['level1'])}")
-        if final_hierarchy["level1"]:
-            print(f"    示例: {[i['display'] for i in final_hierarchy['level1'][:2]]}")
-        print(f"  Level 2 (Word H3): {len(final_hierarchy['level2'])}")
-        if final_hierarchy["level2"]:
-            print(f"    示例: {[i['display'] for i in final_hierarchy['level2'][:2]]}")
-        print(f"  Level 3 (Word H4/H5): {len(final_hierarchy['level3'])}")
-        if final_hierarchy["level3"]:
-            print(f"    示例: {[i['display'] for i in final_hierarchy['level3'][:2]]}")
-
-        return final_hierarchy
 
     def extract_excel_content(
         self, excel_file: str, mode: str = "flat", **kwargs
@@ -1037,8 +1372,13 @@ class HierarchicalMatcher:
 
                 # 如果开启了全文搜索，还需要提取内容项 (content 列表中的每一行)
                 if full_text_search:
-                    for line in s.get("content", []):
-                        if not line.strip():
+                    content_data = s.get("content", [])
+                    # [BUGFIX] 如果 content 是字符串（DocumentProcessor 默认 join 后的结果），需要按行拆分
+                    if isinstance(content_data, str):
+                        content_data = content_data.split("\n")
+
+                    for line in content_data:
+                        if not line or not line.strip():
                             continue
                         cleaned_line = self.basic_clean(line)
                         if len(cleaned_line) < 2:
@@ -1330,22 +1670,36 @@ class HierarchicalMatcher:
         # 1. 统一提取 Word 内容
         if word_sections_preloaded is not None:
             # 这里的 word_sections_preloaded 是 DocumentProcessor.extract_word_structure 返回的格式
-            # 需要将其转换为 HierarchicalMatcher 内部使用的三层层级字典格式
+            # 【修复】保持完整的层级结构，不压缩到三层
             word_hierarchy = {"level1": [], "level2": [], "level3": []}
+            # 新增：保存所有项的完整列表，用于保持原始层级结构
+            word_hierarchy["all_items"] = []
+
             for idx, s in enumerate(word_sections_preloaded):
-                lvl = s.get("level", 0)
+                lvl = s.get("level", s.get("depth", 0))
+                # 【兼容性修复】支持 DocumentProcessor("num", "title") 和 HierarchicalMatcher("number", "text", "display") 两种格式
+                num = s.get("num") or s.get("number", "")
+                title = s.get("title") or s.get("text") or s.get("display", "")
+
+                # 如果是 DocumentProcessor 格式，title 可能是纯文本。我们需要一个包含编号的显示名称用于报告展示
+                display_name = s.get("display") or (f"{num} {title}" if num else title)
+
                 item = {
-                    "number": s.get("num", ""),
-                    "text": s.get("title", ""),
-                    "display": (
-                        f"[{s.get('num', '')}] {s.get('title', '')}"
-                        if s.get("num")
-                        else s.get("title", "")
-                    ),
+                    "number": num,
+                    "text": title,
+                    "display": display_name,
+                    "original": s.get("original") or display_name,
                     "depth": lvl,
                     "order": idx,
                     "in_toc": True,  # 预解析数据默认按标题类处理
+                    "level": lvl,  # 向后兼容
                 }
+
+                # 【保持原始层级】添加到 all_items 以保持正确的树形结构
+                word_hierarchy["all_items"].append(item)
+
+                # 【向下兼容】仍然添加到对应的分类桶中
+                # 但对于第4层及以上，仍归入 level3 桶（用于匹配时的搜索空间）
                 if lvl == 1:
                     word_hierarchy["level1"].append(item)
                 elif lvl == 2:
@@ -1354,7 +1708,7 @@ class HierarchicalMatcher:
                     word_hierarchy["level3"].append(item)
         else:
             word_hierarchy = self.extract_word_content(
-                word_file, mode="hierarchical", progress_callback=progress_callback
+                word_file, mode="stable", progress_callback=progress_callback
             )
 
         if progress_callback:
@@ -1430,18 +1784,36 @@ class HierarchicalMatcher:
             }
 
         # 统计各层级数量
-        total_l1 = len(word_hierarchy["level1"])
-        total_l2 = len(word_hierarchy["level2"])
-        total_l3 = len(word_hierarchy["level3"])
+        # 【修复】当使用 all_items 时，从实际深度统计
+        if "all_items" in word_hierarchy and word_hierarchy["all_items"]:
+            # 从完整列表中统计各层级
+            depth_counts = {}
+            for item in word_hierarchy["all_items"]:
+                depth = item.get("depth", 0)
+                depth_counts[depth] = depth_counts.get(depth, 0) + 1
+
+            total_l1 = depth_counts.get(1, 0)
+            total_l2 = depth_counts.get(2, 0)
+            total_l3 = sum(depth_counts.get(d, 0) for d in depth_counts if d >= 3)
+        else:
+            # 回退：从分类桶中统计
+            total_l1 = len(word_hierarchy["level1"])
+            total_l2 = len(word_hierarchy["level2"])
+            total_l3 = len(word_hierarchy["level3"])
 
         # 合并所有层级并按原始顺序排序
-        all_items = []
-        for item in word_hierarchy["level1"]:
-            all_items.append(item)
-        for item in word_hierarchy["level2"]:
-            all_items.append(item)
-        for item in word_hierarchy["level3"]:
-            all_items.append(item)
+        # 【修复】如果存在 all_items（来自预加载的数据），优先使用它以保持完整层级结构
+        if "all_items" in word_hierarchy and word_hierarchy["all_items"]:
+            all_items = word_hierarchy["all_items"]
+        else:
+            # 回退：从三层桶中合并（用于非预加载的数据）
+            all_items = []
+            for item in word_hierarchy["level1"]:
+                all_items.append(item)
+            for item in word_hierarchy["level2"]:
+                all_items.append(item)
+            for item in word_hierarchy["level3"]:
+                all_items.append(item)
 
         # 按原始文档顺序排序（使用order字段）
         all_items.sort(key=lambda x: x.get("order", 0))

@@ -29,6 +29,7 @@ from utils.report_generator import ReportGenerator
 from utils.path_utils import get_resource_path, clean_project_name, open_directory
 from utils.runtime_logger import RuntimeLogger
 from extend.matcher_config import MatcherConfig
+from extend.hierarchical_matcher import HierarchicalMatcher
 
 
 class ValidationWorker(QThread):
@@ -104,12 +105,47 @@ class ValidationWorker(QThread):
                 self.progress.emit(8, "正在提取文档深层结构 (目录/层级)...")
 
                 # 开始并发提取详细结构 (利用已加载的对象)
-                RuntimeLogger.log(f"🔎 [Step 0] 正在预提取 Word 目录树... (深度解析中)")
+                # 【优先使用稳定提取】使用 HierarchicalMatcher 替代 DocumentProcessor
+                RuntimeLogger.log(
+                    f"🔎 [Step 0] 正在预提取 Word 目录树... (优先使用稳定大纲提取)"
+                )
+
+                matcher = HierarchicalMatcher()
+
+                # 修改为接受路径和对象，优先使用 COM 接口（获取准确编号和过滤正文）
+                def extract_word_hierarchy(path, doc_obj):
+                    """包装函数：优先使用稳定 COM 提取大纲编号，并保留正文内容用于查重"""
+                    try:
+                        # 1. 【核心优化】优先尝试使用基于 Word COM 接口的稳定提取 (支持获取完整编号、正确过滤正文、提取各章节内容)
+                        if path and os.path.exists(path):
+                            RuntimeLogger.log(
+                                f"  [INFO] 正在对 {os.path.basename(path)} 执行稳定全结构提取 (COM)..."
+                            )
+                            # 调用 DocumentProcessor 的稳定模式，它会提取正文用于查重，同时保留准确的编号
+                            result = DocumentProcessor.extract_word_structure(
+                                path, use_stable=True
+                            )
+                            if result and len(result) > 0:
+                                return result
+
+                        # 2. 备选方案 A：尝试从 python-docx 对象中提取 (如果是 BytesIO 加载的文档)
+                        result = matcher.extract_outline_from_docx_object(doc_obj)
+                        if result.get("all_items") and len(result["all_items"]) > 0:
+                            return result["all_items"]
+
+                        # 3. 备选方案 B：降级
+                        raise Exception("无法通过 COM 接口提取文档结构")
+                    except Exception as e:
+                        RuntimeLogger.log(
+                            f"[WARN] 稳定提取模式受限，降级使用 python-docx: {e}"
+                        )
+                        return DocumentProcessor.extract_word_structure(doc_obj)
+
                 future_tpl_struct = executor.submit(
-                    DocumentProcessor.extract_word_structure, tpl_doc
+                    extract_word_hierarchy, template_path, tpl_doc
                 )
                 future_target_struct = executor.submit(
-                    DocumentProcessor.extract_word_structure, target_doc
+                    extract_word_hierarchy, pair["word"], target_doc
                 )
                 excel_info = future_excel_info.result()  # 这个通常很快，因为内部有缓存
 

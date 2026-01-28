@@ -5,6 +5,7 @@ from docx import Document
 import tempfile
 import shutil
 import sys
+from pathlib import Path
 
 # 确保可以导入 extend 目录下的模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -158,6 +159,210 @@ class DocumentProcessor:
             pythoncom.CoUninitialize()
 
     @staticmethod
+    def extract_word_outline_stable_win32(file_path, max_level=9):
+        """
+        稳定的大纲提取方法 (基于 OutlineLevel)，完美解决编号丢失和正文过滤问题。
+        对应 test_oval.py 的优化版本，支持提取正文内容。
+        """
+        import win32com.client as win32
+        import pythoncom
+
+        pythoncom.CoInitialize()
+        word = None
+        doc = None
+        sections = []
+
+        try:
+            abs_path = os.path.abspath(str(file_path))
+            if not os.path.exists(abs_path):
+                return []
+
+            # 启动 Word
+            try:
+                word = win32.DispatchEx("Word.Application")
+            except:
+                word = win32.Dispatch("Word.Application")
+
+            word.Visible = False
+            word.DisplayAlerts = 0
+
+            doc = word.Documents.Open(
+                FileName=abs_path,
+                ReadOnly=True,
+                AddToRecentFiles=False,
+                ConfirmConversions=False,
+                Visible=False,
+            )
+
+            # 刷新大纲视图环境
+            try:
+                word.ActiveWindow.View.Type = 3  # wdOutlineView
+            except:
+                pass
+
+            # 自动编号计数器 (支持 1-9 级大纲)
+            auto_counters = [0] * 10
+
+            current_section = {
+                "level": 0,
+                "title": "前言/未归类",
+                "num": "",
+                "content": [],
+                "full_path": "前言",
+            }
+
+            # 遍历段落
+            for para in doc.Paragraphs:
+                try:
+                    level = para.OutlineLevel
+                    text = para.Range.Text
+                    if not text or text.strip() in ["\r", "\x07", ""]:
+                        continue
+
+                    # 1-9 级大纲项
+                    if 1 <= level <= 9 and level <= max_level:
+                        # 1. 更新结构化计数器
+                        auto_counters[level] += 1
+                        for i in range(level + 1, 10):
+                            auto_counters[i] = 0
+                        # 生成默认结构编号 (如 1.2.1)
+                        struct_num = ".".join(
+                            str(auto_counters[i]) for i in range(1, level + 1)
+                        )
+
+                        # 保存上一个章节
+                        if (
+                            current_section["title"] != "前言/未归类"
+                            or current_section["content"]
+                        ):
+                            current_section["content"] = "\n".join(
+                                current_section["content"]
+                            ).strip()
+                            sections.append(current_section)
+
+                        # 处理新章节标题
+                        try:
+                            list_text = str(para.Range.ListFormat.ListString).strip()
+                        except:
+                            list_text = ""
+
+                        title = text.strip().replace("\r", "").replace("\x07", "")
+
+                        num_clean = ""
+                        if list_text:
+                            num_clean = (
+                                list_text.rstrip(".")
+                                .rstrip(")")
+                                .rstrip("：")
+                                .rstrip(":")
+                                .strip()
+                            )
+                            if title.startswith(list_text):
+                                title = title[len(list_text) :].strip()
+                            elif num_clean and title.startswith(num_clean):
+                                title = re.sub(
+                                    rf"^{re.escape(num_clean)}[\s\.．、]*", "", title
+                                ).strip()
+                        else:
+                            # 尝试从标题提取手动编号
+                            num_match = re.match(r"^([\d\.]+)\s*(.*)", title)
+                            if num_match:
+                                candidate = num_match.group(1).rstrip(".")
+                                # 验证改进：含有点的多级编号，或短小的单级编号
+                                if "." in candidate or len(candidate) <= 2:
+                                    num_clean = candidate
+                                    title = num_match.group(2).strip()
+                            else:
+                                # 尝试匹配中文编号，如 "一、", "第一章", "1.1" (全角)
+                                cn_num_match = re.match(
+                                    r"^([第]?[一二三四五六七八九十百]+[章节]?|[0-9\.]+)[、\.\s]",
+                                    title,
+                                )
+                                if cn_num_match:
+                                    num_clean = cn_num_match.group(1).strip()
+                                    title = title[cn_num_match.end() :].strip()
+
+                        # 2. 关键优化：如果未提取到显式编号，使用结构化编号补全
+                        if not num_clean:
+                            num_clean = struct_num
+                        else:
+                            # 如果提取到了显式编号，尝试同步计数器，保证后续自动编号的连续性
+                            # 仅处理类似 "4.1" 这种纯点分数字格式
+                            try:
+                                parts = [
+                                    int(p) for p in num_clean.split(".") if p.isdigit()
+                                ]
+                                if len(parts) == level:
+                                    for i, p_val in enumerate(parts):
+                                        auto_counters[i + 1] = p_val
+                            except:
+                                pass
+
+                        # 关键：title 只保留核心文本以提高匹配成功率，num 专门存储编号
+                        final_title = f"{num_clean} {title}" if num_clean else title
+                        current_section = {
+                            "level": level,
+                            "title": title,  # 仅标题文本
+                            "num": num_clean,
+                            "display": final_title,  # 完整显示文本
+                            "content": [],
+                            "full_path": "",  # 后续统一计算
+                        }
+                    else:
+                        # 正文内容
+                        content_text = (
+                            text.strip().replace("\r", "").replace("\x07", "")
+                        )
+                        if content_text:
+                            current_section["content"].append(content_text)
+                except:
+                    continue
+
+            # 保存最后一个章节
+            if current_section["title"] != "前言/未归类" or current_section["content"]:
+                current_section["content"] = "\n".join(
+                    current_section["content"]
+                ).strip()
+                sections.append(current_section)
+
+            # 补充 full_path
+            current_titles = {}
+            for s in sections:
+                lvl = s["level"]
+                current_titles[lvl] = s["title"]
+                for i in range(lvl + 1, 10):
+                    current_titles[i] = ""
+                path_parts = [
+                    current_titles[i]
+                    for i in range(1, lvl + 1)
+                    if i in current_titles and current_titles[i]
+                ]
+                s["full_path"] = " > ".join(path_parts)
+
+            print(f"[STABLE-EXTRACT] ✓ 成功提取 {len(sections)} 个章节")
+            return sections
+
+        except Exception as e:
+            print(f"[STABLE-EXTRACT] ❌ 失败: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return []
+        finally:
+            if doc:
+                try:
+                    doc.Close(False)
+                except:
+                    pass
+            if word:
+                try:
+                    if word.Documents.Count == 0:
+                        word.Quit()
+                except:
+                    pass
+            pythoncom.CoUninitialize()
+
+    @staticmethod
     def load_word_document(file_path):
         """加载 Word 文档并返回 Document 对象"""
         file_path_str = str(file_path)
@@ -193,12 +398,17 @@ class DocumentProcessor:
             raise
 
     @staticmethod
-    def extract_word_structure(file_path):
+    def extract_word_structure(file_path, use_stable=False):
         """
         提取 Word 文档的全层级标题及正文
         支持文件路径（str）或已加载的 Document 对象
         """
         import re  # 确保在函数作用域内可以访问re模块
+
+        # 如果启用稳定大纲提取模式 (基于 Word COM)
+        if use_stable and isinstance(file_path, (str, Path)):
+            print(f"[PROCESS] 启用稳定大纲提取模式: {file_path}")
+            return DocumentProcessor.extract_word_outline_stable_win32(file_path)
 
         temp_docx = None
         doc = None
@@ -400,6 +610,7 @@ class DocumentProcessor:
                 # 1. 【优先】检查大纲级别 (Word XML outline level)
                 # 完全模拟WPS大纲视图：只要段落有大纲级别，就应该被识别为标题
                 # WPS智能目录/大纲视图就是基于这个属性，不依赖样式、加粗等其他特征
+                # 【重要】outline level是Word对文档结构的官方定义，应该绝对信任
                 if pPr is not None:
                     try:
                         if pPr.outlineLvl is not None:
@@ -409,20 +620,21 @@ class DocumentProcessor:
                             if val >= 9:
                                 return None
 
-                            # 【简化过滤】WPS大纲视图显示所有有大纲级别的段落
-                            # 只过滤明显的误识别情况：
-                            # 1. Normal样式 + 无编号 + 无加粗 + 超长文本(>80字符，可能是正文段落)
-                            if (
-                                style_lower == "normal"
-                                and not is_bold
-                                and not re.match(r"^\d+", text.strip())
-                                and len(text.strip()) > 80
-                            ):
-                                # 这可能是误标了大纲级别的正文段落
-                                return None
+                            # 【关键修复】完全信任outline level
+                            # Word的outline level: 0-8对应9个层级
+                            # 我们映射为: 0→1, 1→2, ..., 8→9
+                            outline_level = val + 1
+
+                            # 【只有一个严格的过滤条件】：
+                            # 如果文本超长（>150字符）且是normal样式，可能是误标的正文
+                            # 但我们优先相信outline level，只在明显异常时才过滤
+                            if len(text.strip()) > 150 and style_lower == "normal":
+                                # 仍然返回outline level，而不是None
+                                # 让后续逻辑来判断是否需要处理
+                                pass
 
                             # 其他所有有大纲级别的段落都识别为标题（模拟WPS大纲视图）
-                            return val + 1
+                            return outline_level
                     except:
                         pass
 
@@ -698,6 +910,7 @@ class DocumentProcessor:
                 # 2. 去前缀匹配：text == "1 需求说明", toc_title == "需求说明"
                 # 3. 部分匹配（仅限Heading样式）：text == "需求说明", toc_title 可能在"1. 需求说明"中
                 # 【关键修复】按顺序从列表中查找未使用的TOC条目，支持重复标题
+                # 【增强】改进匹配策略：优先考虑编号继承关系
                 matched_toc = None
                 matched_toc_index = None
 
@@ -706,20 +919,57 @@ class DocumentProcessor:
                     "heading" in style_name.lower() or "标题" in style_name.lower()
                 )
 
+                # 【新增】提前检测正文文本中是否包含明确的多级编号
+                # 例如 "4.1.1.1 集团360画像"，如果有明确编号，优先用编号来匹配TOC
+                text_explicit_num = None
+                text_explicit_num_match = re.match(r"^\s*(\d+(?:\.\d+)+)\s+(.+)$", text)
+                if text_explicit_num_match:
+                    text_explicit_num = text_explicit_num_match.group(1)
+                    text_title_only = text_explicit_num_match.group(2).strip()
+
+                    # 【优先策略】如果正文有明确的多级编号，首先在TOC中查找相同编号
+                    for idx, (
+                        toc_title,
+                        toc_number,
+                        toc_level,
+                        has_number,
+                        used,
+                    ) in enumerate(toc_entries_list):
+                        if used:
+                            continue
+                        # 精确匹配编号
+                        if toc_number and toc_number == text_explicit_num:
+                            matched_toc = (
+                                toc_title,
+                                (toc_number, toc_level, has_number),
+                            )
+                            matched_toc_index = idx
+                            print(
+                                f"[TOC-MATCH-BY-NUMBER] 通过编号精确匹配: '{text}' → TOC '{toc_number}'"
+                            )
+                            break
+
                 # 模式1: 精确匹配 - 在列表中按顺序查找第一个未使用的匹配项
-                for idx, (
-                    toc_title,
-                    toc_number,
-                    toc_level,
-                    has_number,
-                    used,
-                ) in enumerate(toc_entries_list):
-                    if used:
-                        continue
-                    if text == toc_title:
-                        matched_toc = (toc_title, (toc_number, toc_level, has_number))
-                        matched_toc_index = idx
-                        break
+                if not matched_toc:
+                    for idx, (
+                        toc_title,
+                        toc_number,
+                        toc_level,
+                        has_number,
+                        used,
+                    ) in enumerate(toc_entries_list):
+                        if used:
+                            continue
+                        if text == toc_title:
+                            matched_toc = (
+                                toc_title,
+                                (toc_number, toc_level, has_number),
+                            )
+                            matched_toc_index = idx
+                            print(
+                                f"[TOC-MATCH-EXACT] 精确标题匹配: '{text}' → TOC '{toc_number}'"
+                            )
+                            break
 
                 if not matched_toc:
                     # 模式2: 去除正文标题开头的编号后匹配
@@ -747,17 +997,7 @@ class DocumentProcessor:
                                     if original_num == toc_number:
                                         # 原编号与TOC编号一致，直接使用原文本
                                         print(
-                                            f"[TOC-MATCH-PREFIX] 去除前缀后匹配，编号一致: '{text}' → TOC '{toc_number}'"
-                                        )
-                                        # 设置level但不修改text
-                                        level = toc_level
-                                        matched_toc_index = idx
-                                        matched_toc = None  # 不走后续的text重写逻辑
-                                        break
-                                    else:
-                                        # 原编号与TOC编号不一致，使用TOC编号
-                                        print(
-                                            f"[TOC-MATCH-PREFIX-FIX] 去除前缀后匹配，编号不一致: '{text}' (原:{original_num}) → TOC '{toc_number}'"
+                                            f"[TOC-MATCH-PREFIX-BY-NUM] 去除前缀后匹配且编号一致: '{text}' → TOC '{toc_number}'"
                                         )
                                         matched_toc = (
                                             toc_title,
@@ -765,7 +1005,24 @@ class DocumentProcessor:
                                         )
                                         matched_toc_index = idx
                                         break
-                                # 如果没有匹配到编号，继续走后续逻辑
+                                    else:
+                                        # 原编号与TOC编号不一致，打日志但继续
+                                        print(
+                                            f"[TOC-MISMATCH-NUM] 标题匹配但编号不同: 原'{original_num}' vs TOC'{toc_number}'"
+                                        )
+                                        # 继续尝试其他TOC条目
+                                        continue
+                                else:
+                                    # 原文本无编号，使用TOC编号
+                                    matched_toc = (
+                                        toc_title,
+                                        (toc_number, toc_level, has_number),
+                                    )
+                                    matched_toc_index = idx
+                                    print(
+                                        f"[TOC-MATCH-PREFIX] 去除前缀后匹配: '{text}' → TOC '{toc_number}'"
+                                    )
+                                    break
 
                     if not matched_toc and is_heading_style:
                         # 模式3: 部分匹配（仅对Heading样式）
@@ -1101,6 +1358,38 @@ class DocumentProcessor:
                     # 没有匹配到TOC，使用原有逻辑识别层级
                     level = get_level_enhanced(text, style_name, paragraph)
 
+                    # 【关键修复】当没有匹配到TOC时，尝试从前面已提取的编号推导
+                    # 如果当前项目的标题出现在某个已识别的TOC条目中，使用TOC的编号
+                    if not matched_toc and level is not None:
+                        # 尝试模糊匹配：查找包含当前文本的TOC条目
+                        text_clean = (
+                            re.sub(r"^[\d\.]+\s+", "", text).strip().rstrip(":：")
+                        )
+                        for (
+                            toc_title,
+                            toc_number,
+                            toc_level,
+                            has_number,
+                            used,
+                        ) in toc_entries_list:
+                            if not used and text_clean and toc_title:
+                                # 检查是否包含关系或相似
+                                if (
+                                    text_clean in toc_title
+                                    or toc_title in text_clean
+                                    or text_clean == toc_title
+                                ):
+                                    # 找到可能的匹配
+                                    matched_toc = (
+                                        toc_title,
+                                        (toc_number, toc_level, has_number),
+                                    )
+                                    level = toc_level
+                                    print(
+                                        f"[TOC-FUZZY-MATCH] 模糊匹配找到TOC: '{text_clean}' → '{toc_number}'"
+                                    )
+                                    break
+
                 # 【列表项强制识别】
                 # 在"过程说明"等章节下，强制识别"1. xxx"、"2. xxx"格式为列表项
                 # 必须在level判定后、但在跳变约束前处理，避免被误判为其他层级
@@ -1208,6 +1497,18 @@ class DocumentProcessor:
                                 level = None
 
                 if level:
+                    # 【快速路径】如果段落有outline level，应该优先信任outline level
+                    # 直接根据outline level生成编号，不必等待TOC匹配
+                    has_outline_level_for_numbering = False
+                    outline_level_value = None
+                    try:
+                        pPr = paragraph._element.pPr
+                        if pPr is not None and pPr.outlineLvl is not None:
+                            outline_level_value = int(pPr.outlineLvl.val) + 1
+                            has_outline_level_for_numbering = True
+                    except:
+                        pass
+
                     # 检查是否进入"过程说明"章节（对于非TOC匹配的情况）
                     text_without_number = re.sub(r"^[\d\.]+\s*", "", text).strip()
                     procedure_keywords = [
@@ -1274,6 +1575,13 @@ class DocumentProcessor:
                         # 核心修复：手动编号严格覆盖初步探测的 level
                         level = num_level
 
+                        # 【关键优化】如果有outline level，优先使用outline level
+                        if has_outline_level_for_numbering and outline_level_value:
+                            level = outline_level_value
+                            print(
+                                f"[OUTLINE-PRIORITY] 使用outline level覆盖手动编号检测: 文本编号={num_level} → outline_level={outline_level_value}"
+                            )
+
                         # 【重复检测】基于(编号,标题)完全匹配检测重复
                         is_duplicate = False
                         # 先提取标题文本
@@ -1304,17 +1612,31 @@ class DocumentProcessor:
                             if clean_content.startswith(("、", ".", "．", " ")):
                                 clean_content = clean_content.lstrip("、.． ").strip()
 
-                            # 强制同步计数器
-                            for i, p in enumerate(parts):
-                                idx = i + 1
-                                if idx < len(level_counters):
-                                    try:
-                                        level_counters[idx] = int(p)
-                                    except:
-                                        pass
-                            # 重置子级
-                            for i in range(num_level + 1, len(level_counters)):
-                                level_counters[i] = 0
+                            # 【关键优化】如果有outline level，用outline level来同步计数器
+                            if has_outline_level_for_numbering and outline_level_value:
+                                # 基于outline level同步计数器
+                                # 只增加该层级，保留上层的值，重置下层
+                                level_counters[outline_level_value] += 1
+                                for deeper in range(
+                                    outline_level_value + 1, len(level_counters)
+                                ):
+                                    level_counters[deeper] = 0
+                                print(
+                                    f"[OUTLINE-SYNC] 基于outline level同步计数器: level={outline_level_value}, counters[1-6]={level_counters[1:7]}"
+                                )
+                            else:
+                                # 原有的手动编号同步逻辑
+                                # 强制同步计数器
+                                for i, p in enumerate(parts):
+                                    idx = i + 1
+                                    if idx < len(level_counters):
+                                        try:
+                                            level_counters[idx] = int(p)
+                                        except:
+                                            pass
+                                # 重置子级
+                                for i in range(num_level + 1, len(level_counters)):
+                                    level_counters[i] = 0
 
                             # 保留原文档编号格式，不强制添加"."
                             # 提取原始编号后的分隔符
@@ -1387,6 +1709,58 @@ class DocumentProcessor:
                                 clean_title = f"{auto_num} {text}"
                         else:
                             # 【恢复自动编号】普通章节：根据层级生成编号
+
+                            # 【关键修复】如果有outline level且层级>3，说明是深层项目
+                            # 这种情况下，应该谨慎处理，不能简单地递增当前层级计数器
+                            if (
+                                has_outline_level_for_numbering
+                                and outline_level_value
+                                and outline_level_value > 3
+                            ):
+                                # 深层项目：尝试从文本中推导编号
+                                # 例如"4.1.1.1 xxx"格式
+                                text_num_match = re.match(
+                                    r"^(\d+(?:\.\d+)+)", text.strip()
+                                )
+                                if text_num_match:
+                                    # 从文本中成功提取了编号
+                                    inferred_num = text_num_match.group(1)
+                                    parts_inferred = inferred_num.split(".")
+
+                                    # 同步计数器
+                                    for i, p in enumerate(parts_inferred):
+                                        idx = i + 1
+                                        if idx < len(level_counters):
+                                            try:
+                                                level_counters[idx] = int(p)
+                                            except:
+                                                pass
+                                    # 重置子级
+                                    for i in range(
+                                        len(parts_inferred) + 1, len(level_counters)
+                                    ):
+                                        level_counters[i] = 0
+
+                                    print(
+                                        f"[DEEP-OUTLINE] 从文本推导深层编号: {inferred_num}, level={outline_level_value}"
+                                    )
+                                else:
+                                    # 从文本中找不到编号，但有outline level
+                                    # 这种情况较少见，记录警告
+                                    print(
+                                        f"[WARN] 深层项目但未找到编号: '{text[:40]}', outline_level={outline_level_value}"
+                                    )
+                                    # 不使用自动编号，而是保留原文
+                                    clean_title = text
+                                    current_section = {
+                                        "level": outline_level_value,
+                                        "title": clean_title,
+                                        "num": "",
+                                        "content": [],
+                                        "full_path": "",
+                                    }
+                                    continue
+
                             # 检查是否为有效层级（level > 1 时需要检查父级是否存在）
                             if level > 1 and level_counters[level - 1] == 0:
                                 # 父级层级为0，这是孤儿章节，可能需要跳过或保留原文
@@ -1416,6 +1790,24 @@ class DocumentProcessor:
                                 if level_counters[i] > 0
                             ]
                             auto_num = ".".join(map(str, active_parts))
+
+                            # 【关键检查】检查生成的编号是否已被使用
+                            # 如果已被使用，说明计数器逻辑有问题，需要调整
+                            if auto_num in used_numbers:
+                                print(
+                                    f"[WARN] 自动生成的编号 '{auto_num}' 已被使用！可能是计数器逻辑错误"
+                                )
+                                # 尝试找到下一个可用的编号
+                                counter = 1
+                                while (
+                                    f"{auto_num.rsplit('.', 1)[0]}.{counter}"
+                                    in used_numbers
+                                    and counter < 100
+                                ):
+                                    counter += 1
+                                if counter < 100:
+                                    auto_num = f"{auto_num.rsplit('.', 1)[0]}.{counter}"
+                                    print(f"    → 调整为: {auto_num}")
 
                             print(f"[AUTO-NUM] Text: {text[:40]}, Level: {level}")
                             print(
@@ -2722,6 +3114,7 @@ class DocumentProcessor:
                 header=header_row,
                 progress_callback=progress_callback,
                 hierarchy_log_path=tree_log_path,
+                word_sections_preloaded=word_sections_preloaded,  # [FIX] 传递预加载数据，避免重复提取和错误处理
             )
 
             # 保存报告
