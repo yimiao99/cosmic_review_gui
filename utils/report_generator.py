@@ -73,7 +73,7 @@ class ReportGenerator:
     @classmethod
     def generate_validation_report(cls, task_name, results, output_dir=None):
         """
-        生成全量比对报表
+        生成全量比对报表，包含所有校验步骤的汇总。
         """
         try:
             if output_dir is None:
@@ -83,107 +83,81 @@ class ReportGenerator:
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir, exist_ok=True)
 
-            details = results.get("all_details", [])
-            if not details:
-                return None
-
             # 净化项目名
             clean_name = cls._clean_project_name(task_name)
-
-            # 转换为 DataFrame
-            df = pd.DataFrame(details)
-
-            column_map = {
-                "level": "层级",
-                "chapter": "标准章节",
-                "status": "判定结果",
-                "tpl_sentence": "模板参考句 (对照)",
-                "target_sentence": "上传文本句 (对照)",
-                "score": "重合度",
-            }
-            # 过滤并重命名
-            existing_cols = [c for c in df.columns if c in column_map]
-            df = df[existing_cols].rename(columns=column_map)
-
-            # 格式化百分比
-            if "重合度" in df.columns:
-                df["重合度"] = df["重合度"].apply(
-                    lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) else x
-                )
-
-            # 确定文件名: xxx项目_时间_模板校验评估报告.xlsx
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base_filename = f"{clean_name}_{timestamp}_模板校验评估报告.xlsx"
-            target_path = os.path.join(output_dir, base_filename)
+            base_filename = f"{clean_name}_{timestamp}_全量校验报告.xlsx"
+            final_path = os.path.join(output_dir, base_filename)
 
-            # 防占用处理：如果文件已存在且无法写入，尝试生成副本
-            final_path = target_path
-            counter = 1
-            while True:
-                try:
-                    # 尝试以写模式打开文件以检测占用
-                    if os.path.exists(final_path):
-                        with open(final_path, "a"):
-                            pass
-                    break  # 如果没报错，说明可以写入
-                except (IOError, PermissionError):
-                    # 文件被占用，尝试新名称
-                    name, ext = os.path.splitext(base_filename)
-                    final_path = os.path.join(output_dir, f"{name}({counter}){ext}")
-                    counter += 1
-
-            # 备份之前的版本（如果文件已存在）
-            if os.path.exists(target_path) and target_path != final_path:
-                try:
-                    backup_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    backup_name = f"{clean_name}模板校验评估报告_bak_{backup_time}.xlsx"
-                    backup_path = os.path.join(output_dir, backup_name)
-                    if os.path.exists(target_path):
-                        # 仅在非占用状态下备份
-                        try:
-                            import shutil
-
-                            shutil.copy2(target_path, backup_path)
-                        except:
-                            pass
-                except:
-                    pass
-
-            # 使用 ExcelWriter 保存，带一点样式
+            # 准备各步骤数据
             with pd.ExcelWriter(final_path, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="校验详情")
+                # 1. 概览页
+                summary_data = []
+                for node_key, node_name in [
+                    ("tpl_res", "模板合规性"),
+                    ("null_res", "空值校验"),
+                    ("ratio_res", "比例校验"),
+                    ("factor_check", "因子提取"),
+                    ("hierarchy_res", "层级匹配"),
+                    ("process_res", "功能过程"),
+                    ("move_res", "数据移动"),
+                ]:
+                    res = results.get(node_key, {})
+                    status = "✅ 通过" if res.get("is_valid", True) else "❌ 异常"
+                    if res.get("skipped"): status = "⏩ 跳过"
+                    
+                    summary_data.append({
+                        "校验节点": node_name,
+                        "状态": status,
+                        "详情": str(res.get("statistics", res.get("status", "")))
+                    })
+                pd.DataFrame(summary_data).to_excel(writer, sheet_name="📊 核查概览", index=False)
 
-                workbook = writer.book
-                worksheet = writer.sheets["校验详情"]
-                from openpyxl.styles import Alignment
+                # 2. Node 1: 模板详情
+                tpl_details = results.get("all_details", [])
+                if tpl_details:
+                    df_tpl = pd.DataFrame(tpl_details)
+                    column_map = {
+                        "level": "层级", "chapter": "标准章节", "status": "判定结果",
+                        "tpl_sentence": "模板句", "target_sentence": "匹配句", "score": "相似度"
+                    }
+                    df_tpl = df_tpl[[c for c in df_tpl.columns if c in column_map]].rename(columns=column_map)
+                    df_tpl.to_excel(writer, sheet_name="1.模板校验详情", index=False)
 
-                # 调整列宽并开启自动换行
-                for i, col in enumerate(df.columns):
-                    column_len = (
-                        max(
-                            (
-                                df[col].astype(str).map(len).max()
-                                if not df[col].empty
-                                else 10
-                            ),
-                            len(col),
-                        )
-                        + 2
-                    )
-                    col_letter = chr(65 + i)
-                    worksheet.column_dimensions[col_letter].width = min(column_len, 60)
+                # 3. Node 5: 层级详情
+                h_res = results.get("hierarchy_res", {})
+                h_all = (h_res.get("exact_matched", []) + h_res.get("fuzzy_matched", []) + 
+                        h_res.get("hierarchy_mismatched", []) + h_res.get("not_found_in_word", []))
+                if h_all:
+                    pd.DataFrame(h_all).to_excel(writer, sheet_name="5.层级匹配详情", index=False)
 
-                    # 为正文对照列开启自动换行
-                    if "对照" in col:
-                        for cell in worksheet[col_letter]:
-                            cell.alignment = Alignment(
-                                wrap_text=True, vertical="center"
-                            )
-                    else:
-                        for cell in worksheet[col_letter]:
-                            cell.alignment = Alignment(vertical="center")
+                # 4. Node 6: 功能过程详情
+                p_res = results.get("process_res", {})
+                p_all = (p_res.get("exact_matched", []) + p_res.get("fuzzy_matched", []) + 
+                        p_res.get("not_found_in_word", []))
+                if p_all:
+                    df_p = pd.DataFrame(p_all)
+                    # 确保关键列存在且排在前面
+                    p_cols = ["Excel一级模块", "Excel二级模块", "Excel三级模块", "Excel功能点", "Word匹配项", "相似度", "位置", "匹配状态", "简略描述"]
+                    existing_p_cols = [c for c in p_cols if c in df_p.columns]
+                    # 加入其他可能存在的列
+                    other_cols = [c for c in df_p.columns if c not in p_cols]
+                    df_p = df_p[existing_p_cols + other_cols]
+                    df_p.to_excel(writer, sheet_name="6.功能过程详情", index=False)
+
+                # 5. Node 7: 数据移动详情
+                m_res = results.get("move_res", {})
+                m_details = m_res.get("details", [])
+                if m_details:
+                    pd.DataFrame(m_details).to_excel(writer, sheet_name="7.数据移动详情", index=False)
 
             return final_path
+        except Exception as e:
+            print(f"生成综合报表失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
         except Exception as e:
             print(f"生成报表失败: {e}")
             return None

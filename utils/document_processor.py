@@ -159,7 +159,9 @@ class DocumentProcessor:
             pythoncom.CoUninitialize()
 
     @staticmethod
-    def extract_word_outline_stable_win32(file_path, max_level=9):
+    def extract_word_outline_stable_win32(
+        file_path, max_level=9, progress_callback=None
+    ):
         """
         稳定的大纲提取方法 (基于 OutlineLevel)，完美解决编号丢失和正文过滤问题。
         对应 test_oval.py 的优化版本，支持提取正文内容。
@@ -211,16 +213,51 @@ class DocumentProcessor:
                 "full_path": "前言",
             }
 
-            # 遍历段落
+            # --- 优化：使用 Paragraphs 集合的 Count 属性预获取总数，并添加进度汇报 ---
+            try:
+                total_paras = doc.Paragraphs.Count
+            except:
+                total_paras = 0
+
+            print(f"[PROCESS] 文档预估段落数: {total_paras}，开始提取...")
+
+            p_idx = 0
             for para in doc.Paragraphs:
                 try:
+                    p_idx += 1
                     level = para.OutlineLevel
                     text = para.Range.Text
+
                     if not text or text.strip() in ["\r", "\x07", ""]:
                         continue
 
+                    if p_idx % 500 == 0:
+                        progress_msg = (
+                            f"[PROCESS] 提取进度: {p_idx}/{total_paras}"
+                            if total_paras > 0
+                            else f"[PROCESS] 已提取 {p_idx} 段"
+                        )
+                        print(progress_msg)
+                        if progress_callback:
+                            percent = (
+                                int((p_idx / total_paras) * 100)
+                                if total_paras > 0
+                                else 0
+                            )
+                            progress_callback(percent, progress_msg)
+
                     # 1-9 级大纲项
-                    if 1 <= level <= 9 and level <= max_level:
+                    if (1 <= level <= 9 and level <= max_level) or (
+                        level >= 10 and para.Range.Font.Bold and len(text.strip()) < 50
+                    ):
+                        # 如果是正文但加粗且短，视为 4 级标题（或者比当前章节深一级）
+                        is_pseudo_heading = False
+                        if level >= 10:
+                            is_pseudo_heading = True
+                            level = 4  # 默认设为4级
+                            if current_section and current_section["level"] >= 1:
+                                level = min(9, current_section["level"] + 1)
+
                         # 1. 更新结构化计数器
                         auto_counters[level] += 1
                         for i in range(level + 1, 10):
@@ -286,8 +323,13 @@ class DocumentProcessor:
                         if not num_clean:
                             num_clean = struct_num
                         else:
+                            # 核心修正：如果解析出的编号层级与大纲级别（Style）不符，以编号为准（处理乱序文档）
+                            # 例如：4.1.1 看起来是 3 级，但如果样式被设为了 Heading 1，则 level 会是 1
+                            inferred_level = num_clean.count(".") + 1
+                            if inferred_level != level and inferred_level <= 9:
+                                level = inferred_level
+
                             # 如果提取到了显式编号，尝试同步计数器，保证后续自动编号的连续性
-                            # 仅处理类似 "4.1" 这种纯点分数字格式
                             try:
                                 parts = [
                                     int(p) for p in num_clean.split(".") if p.isdigit()
@@ -398,7 +440,7 @@ class DocumentProcessor:
             raise
 
     @staticmethod
-    def extract_word_structure(file_path, use_stable=False):
+    def extract_word_structure(file_path, use_stable=False, progress_callback=None):
         """
         提取 Word 文档的全层级标题及正文
         支持文件路径（str）或已加载的 Document 对象
@@ -408,7 +450,9 @@ class DocumentProcessor:
         # 如果启用稳定大纲提取模式 (基于 Word COM)
         if use_stable and isinstance(file_path, (str, Path)):
             print(f"[PROCESS] 启用稳定大纲提取模式: {file_path}")
-            return DocumentProcessor.extract_word_outline_stable_win32(file_path)
+            return DocumentProcessor.extract_word_outline_stable_win32(
+                file_path, progress_callback=progress_callback
+            )
 
         temp_docx = None
         doc = None
@@ -2363,6 +2407,7 @@ class DocumentProcessor:
                         RuntimeLogger.log(f"   [Node 4] 提取到规模因子(文-模糊): {val}")
 
             # B. 扫描质量特性段落 (限定范围)
+            last_key = None
             for para in quality_paras:
                 text = para.text.strip()
                 if not text:
@@ -2373,27 +2418,21 @@ class DocumentProcessor:
                     factors["_global_default"] = True
                     RuntimeLogger.log(f"   [Node 4] 发现全局默认(无)标记")
 
+                found_any_key_in_this_para = False
                 for key in [
                     "distributed",
                     "performance",
                     "reliability",
                     "multiple_sites",
                 ]:
-                    if (
-                        factors[key]["text_value"] is not None
-                        and factors[key]["text_value"] != "已识别标题"
-                    ):
-                        continue  # 已有实质性结果则跳过
-
                     kw = factors[key]["name"]
-                    # 优化：支持带冒号的提取
+                    # 优化关键字匹配：支持中文数字编号 (一、二、三、四)
                     is_key_match = False
-                    # 匹配格式：关键字 + 符号 + 内容
                     if text.startswith(kw) or re.search(
-                        rf"^[\d\s\.、\(\)（）]*{kw}", text
+                        rf"^[①-⑩\d\s\.、\(\)（）一二三四五六七八九十]*{kw}", text
                     ):
                         # 确保是标题行（后面带冒号或整体较短）
-                        if re.search(rf"{kw}[:：\s]", text) or len(text) < 30:
+                        if re.search(rf"{kw}[:：\s]", text) or len(text) < 40:
                             is_key_match = True
 
                     if is_key_match:
@@ -2401,6 +2440,8 @@ class DocumentProcessor:
                         if text.count(".") > 5:
                             continue
 
+                        last_key = key
+                        found_any_key_in_this_para = True
                         factors[key]["found_in_text"] = True
                         RuntimeLogger.log(
                             f"   [Node 4] 匹配到因子关键字: {kw} (原文: '{text[:40]}...')"
@@ -2504,6 +2545,16 @@ class DocumentProcessor:
                             factors[key]["found_in_text"] = True
                             factors[key]["text_value"] = "已识别标题"
                             # 暂不设 factors[key]["value"]，让后面的段落内容来填充
+
+                # [Optimization] 粘性上下文：如果当前段落没有发现新关键字，但存在 last_key，
+                # 且当前段落有实质内容，则补全 last_key 的有效性判定
+                if not found_any_key_in_this_para and last_key:
+                    if len(text) > 5 and not factors[last_key].get("value"):
+                        # 只要不是明显的新章节标题，就视为上一个因子的描述延伸
+                        if not re.match(r"^[一二三四五六七八九十]、", text):
+                            factors[last_key]["text_value"] = "1"
+                            factors[last_key]["value"] = "1"
+                            factors[last_key]["found_in_text"] = True
 
                 # 针对“均一致”或“均设置为-1”等合并描述
                 if ("均" in text or "都" in text) and any(
@@ -3150,6 +3201,7 @@ class DocumentProcessor:
         progress_callback=None,
         word_sections_preloaded=None,
         project_name=None,
+        hierarchy_mapping=None,  # [NEW]
     ):
         """
         节点6：功能过程校验
@@ -3185,10 +3237,17 @@ class DocumentProcessor:
             # 加载配置
             config = MatcherConfig.load()
             p_config = config.get("process", MatcherConfig.get_defaults()["process"])
+            h_config = config.get(
+                "hierarchy", MatcherConfig.get_defaults()["hierarchy"]
+            )
+
             # 使用参数提供的列，否则使用配置
             func_proc_col = (
                 func_col if func_col is not None else p_config.get("column", 6)
             )  # 0-indexed
+            l1_col = h_config.get("level1_col", 1)
+            l2_col = h_config.get("level2_col", 2)
+            l3_col = h_config.get("level3_col", 3)
 
             matcher = HierarchicalMatcher(fuzzy_match=fuzzy_match, threshold=threshold)
 
@@ -3236,6 +3295,10 @@ class DocumentProcessor:
                 sheet_name=target_sheet,
                 header=header_row,
                 column=func_proc_col,
+                level1_col=l1_col,
+                level2_col=l2_col,
+                level3_col=l3_col,
+                hierarchy_mapping=hierarchy_mapping,  # [NEW]
                 full_text_search=True,  # 功能过程通常在正文中
                 word_items_preloaded=(
                     word_content if isinstance(word_content, list) else None

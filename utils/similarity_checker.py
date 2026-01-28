@@ -310,11 +310,21 @@ class SimilarityChecker:
             "match_count": 0,
         }
 
+        # --- 性能优化：预处理 ---
+        excel_cleans = [clean_title(m) for m in excel_modules]
+        excel_set = set(excel_cleans)
+        word_cleans = [clean_title(wm) for wm in word_modules]
+        word_set = set(word_cleans)
+        
         # 3. 双向比对
         # Word -> Excel
-        excel_cleans = [clean_title(m) for m in excel_modules]
-        for wm in word_modules:
-            wm_clean = clean_title(wm)
+        for wm, wm_clean in zip(word_modules, word_cleans):
+            # 优先 O(1) 精确查找
+            if wm_clean in excel_set:
+                results["match_count"] += 1
+                continue
+            
+            # 模糊匹配
             found = False
             for ec in excel_cleans:
                 if cls.calculate_string_similarity(wm_clean, ec) > 0.6:
@@ -325,9 +335,12 @@ class SimilarityChecker:
                 results["word_extra"].append(wm)
 
         # Excel -> Word
-        word_cleans = [clean_title(wm) for wm in word_modules]
-        for em in excel_modules:
-            em_clean = clean_title(em)
+        for em, em_clean in zip(excel_modules, excel_cleans):
+            # 优先 O(1) 精确查找
+            if em_clean in word_set:
+                continue
+                
+            # 模糊匹配
             found = False
             for wc in word_cleans:
                 if cls.calculate_string_similarity(em_clean, wc) > 0.6:

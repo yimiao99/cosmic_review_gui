@@ -106,58 +106,89 @@ class ValidationWorker(QThread):
 
                 # 开始并发提取详细结构 (利用已加载的对象)
                 # 【优先使用稳定提取】使用 HierarchicalMatcher 替代 DocumentProcessor
-                RuntimeLogger.log(
-                    f"🔎 [Step 0] 正在预提取 Word 目录树... (优先使用稳定大纲提取)"
-                )
+                
+                # [优化] 只有在需要 Word 相关内容时才执行昂贵的结构提取
+                run_template = raw_info.get("run_template", True)
+                run_factors = raw_info.get("run_factors", True)
+                run_hierarchy = raw_info.get("run_hierarchy", True)
+                run_simple = raw_info.get("run_simple", False)
 
-                matcher = HierarchicalMatcher()
+                need_target_structure = any([run_template, run_factors, run_hierarchy, run_simple])
+                # 只有 Step 1 模板校验真正需要解析模板文档结构
+                need_tpl_structure = run_template
 
-                # 修改为接受路径和对象，优先使用 COM 接口（获取准确编号和过滤正文）
-                def extract_word_hierarchy(path, doc_obj):
-                    """包装函数：优先使用稳定 COM 提取大纲编号，并保留正文内容用于查重"""
-                    try:
-                        # 1. 【核心优化】优先尝试使用基于 Word COM 接口的稳定提取 (支持获取完整编号、正确过滤正文、提取各章节内容)
-                        if path and os.path.exists(path):
+                template_sections = []
+                target_sections = []
+
+                if need_target_structure:
+                    RuntimeLogger.log(
+                        f"🔎 [Step 0] 正在预提取 Word 目录树... (优先使用稳定大纲提取)"
+                    )
+
+                    matcher = HierarchicalMatcher()
+
+                    # 修改为接受路径 and 对象，优先使用 COM 接口（获取准确编号 and 过滤正文）
+                    def extract_word_hierarchy(path, doc_obj):
+                        """包装函数：优先使用稳定 COM 提取大纲编号，并保留正文内容用于查重"""
+
+                        def extraction_progress_proxy(p, msg):
+                            """转换提取进度为 UI 友好的进度点"""
+                            # 文档结构提取占约 10% 的进度权重，从 8% 映射到 18%
+                            mapped_p = 8 + int(p * 0.1)
+                            self.progress.emit(mapped_p, msg)
+
+                        try:
+                            # 1. 【核心优化】优先尝试使用基于 Word COM 接口的稳定提取 (支持获取完整编号、正确过滤正文、提取各章节内容)
+                            if path and os.path.exists(path):
+                                RuntimeLogger.log(
+                                    f"  [INFO] 正在对 {os.path.basename(path)} 执行稳定全结构提取 (COM)..."
+                                )
+                                # 调用 DocumentProcessor 的稳定模式，它会提取正文用于查重，同时保留准确的编号
+                                result = DocumentProcessor.extract_word_structure(
+                                    path,
+                                    use_stable=True,
+                                    progress_callback=extraction_progress_proxy,
+                                )
+                                if result and len(result) > 0:
+                                    return result
+
+                            # 2. 备选方案 A：尝试从 python-docx 对象中提取 (如果是 BytesIO 加载的文档)
+                            result = matcher.extract_outline_from_docx_object(doc_obj)
+                            if result.get("all_items") and len(result["all_items"]) > 0:
+                                return result["all_items"]
+
+                            # 3. 备选方案 B：降级
+                            raise Exception("无法通过 COM 接口提取文档结构")
+                        except Exception as e:
                             RuntimeLogger.log(
-                                f"  [INFO] 正在对 {os.path.basename(path)} 执行稳定全结构提取 (COM)..."
+                                f"[WARN] 稳定提取模式受限，降级使用 python-docx: {e}"
                             )
-                            # 调用 DocumentProcessor 的稳定模式，它会提取正文用于查重，同时保留准确的编号
-                            result = DocumentProcessor.extract_word_structure(
-                                path, use_stable=True
-                            )
-                            if result and len(result) > 0:
-                                return result
+                            return DocumentProcessor.extract_word_structure(doc_obj)
 
-                        # 2. 备选方案 A：尝试从 python-docx 对象中提取 (如果是 BytesIO 加载的文档)
-                        result = matcher.extract_outline_from_docx_object(doc_obj)
-                        if result.get("all_items") and len(result["all_items"]) > 0:
-                            return result["all_items"]
+                    # 并发执行
+                    futures = {}
+                    if need_tpl_structure:
+                        futures["tpl"] = executor.submit(extract_word_hierarchy, template_path, tpl_doc)
+                    
+                    futures["target"] = executor.submit(extract_word_hierarchy, pair["word"], target_doc)
+                    
+                    excel_info = future_excel_info.result()  # 已有缓存
 
-                        # 3. 备选方案 B：降级
-                        raise Exception("无法通过 COM 接口提取文档结构")
-                    except Exception as e:
-                        RuntimeLogger.log(
-                            f"[WARN] 稳定提取模式受限，降级使用 python-docx: {e}"
-                        )
-                        return DocumentProcessor.extract_word_structure(doc_obj)
+                    if "tpl" in futures:
+                        template_sections = futures["tpl"].result()
+                    
+                    target_sections = futures["target"].result()
+                    
+                    RuntimeLogger.log(
+                        f"✅ [Step 0] 预提取完成，共获取 {len(target_sections)} 个章节/内容项"
+                    )
+                else:
+                    RuntimeLogger.log("🔎 [Step 0] 跳过 Word 结构提取 (未选择任何 Word 校验节点)")
+                    excel_info = future_excel_info.result()
 
-                future_tpl_struct = executor.submit(
-                    extract_word_hierarchy, template_path, tpl_doc
-                )
-                future_target_struct = executor.submit(
-                    extract_word_hierarchy, pair["word"], target_doc
-                )
-                excel_info = future_excel_info.result()  # 这个通常很快，因为内部有缓存
-
-                template_sections = future_tpl_struct.result()
-                target_sections = future_target_struct.result()
-                RuntimeLogger.log(
-                    f"✅ [Step 0] 预提取完成，共获取 {len(target_sections)} 个三级及以上章节项"
-                )
-
-            if not tpl_doc:
+            if not tpl_doc and need_tpl_structure:
                 RuntimeLogger.log("⚠️ 模板文件加载失败", level="WARN")
-            if not target_doc:
+            if not target_doc and need_target_structure:
                 RuntimeLogger.log("❌ 目标 Word 加载失败", level="ERROR")
                 self.finished.emit({"error": "无法加载 Word 文件"})
                 return
@@ -168,11 +199,8 @@ class ValidationWorker(QThread):
 
             self.progress.emit(15, "正在扫描 Excel 工作表列表...")
             RuntimeLogger.log(
-                f"✅ [Step 0] 预解析完成 (模板: {len(template_sections)}项, 目标: {len(target_sections)}项)"
+                f"✅ [Step 0] 基础对象并发解析完成 (目标项: {len(target_sections)})"
             )
-
-            if not self._is_running:
-                return
 
             if not self._is_running:
                 return
@@ -227,17 +255,20 @@ class ValidationWorker(QThread):
             self.progress.emit(33, "正在准备送审比例计算...")
 
             # 6. 功能匹配校验 (辅助数据)
-            RuntimeLogger.log(
-                f"正在进行 [辅助步骤] Word 与 Excel 模块名称匹配度计算..."
-            )
-            # 传入已加载的 WB
-            excel_modules = DocumentProcessor.get_excel_modules(
-                target_wb, sheet_name=check_sheet
-            )
-            func_match = SimilarityChecker.validate_function_matching(
-                target_sections, excel_modules
-            )
-            v_res["func_match"] = func_match
+            if target_sections and (raw_info.get("run_hierarchy") or raw_info.get("run_simple")):
+                RuntimeLogger.log(
+                    f"正在进行 [辅助步骤] Word 与 Excel 模块名称匹配度计算..."
+                )
+                # 传入已加载的 WB
+                excel_modules = DocumentProcessor.get_excel_modules(
+                    target_wb, sheet_name=check_sheet
+                )
+                func_match = SimilarityChecker.validate_function_matching(
+                    target_sections, excel_modules
+                )
+                v_res["func_match"] = func_match
+            else:
+                v_res["func_match"] = {"skipped": True}
 
             # 7. 节点 3：送审比例校验
             step3_start = time.time()
@@ -297,6 +328,8 @@ class ValidationWorker(QThread):
             fuzzy = raw_info.get("fuzzy", True)
             threshold = raw_info.get("threshold", 0.8)
 
+            hierarchy_mapping = None # [NEW]
+
             if run_hierarchy:
                 RuntimeLogger.log(f"正在启动 [Step 5] 核心层级匹配校验...")
 
@@ -308,6 +341,7 @@ class ValidationWorker(QThread):
                     self.progress.emit(mapped_progress, f"层级匹配: {msg}")
                     if msg and (
                         "开始" in msg or "完成" in msg or "1/" in msg or "/100" in msg
+                        or "[PROCESS]" in msg or "阶段" in msg or "匹配" in msg
                     ):
                         RuntimeLogger.log(f"[Step 5] {msg}")
 
@@ -332,6 +366,29 @@ class ValidationWorker(QThread):
                     project_name=self.task_data["filename"],
                 )
                 v_res["hierarchy_res"] = hierarchy_res
+                
+                # [Optimization] 提取层级映射结果用于辅助功能过程匹配
+                try:
+                    hierarchy_mapping = {}
+                    # 合并精确匹配和模糊匹配的结果
+                    matched_items = (hierarchy_res.get("exact_matched", []) + 
+                                   hierarchy_res.get("fuzzy_matched", []))
+                    for item in matched_items:
+                        # 构造 Excel 层级 key
+                        e_l1 = str(item.get("Excel一级模块", "")).strip()
+                        e_l2 = str(item.get("Excel二级模块", "")).strip()
+                        e_l3 = str(item.get("Excel三级模块", "")).strip()
+                        key = (e_l1, e_l2, e_l3)
+                        
+                        # 寻找 Word 匹配项 (优先使用三级标题，其次二级，其次一级)
+                        w_title = item.get("Word三级标题") or item.get("Word二级标题") or item.get("Word一级标题")
+                        if w_title:
+                            hierarchy_mapping[key] = w_title
+                    
+                    RuntimeLogger.log(f"已成功提取 {len(hierarchy_mapping)} 个层级映射锚点用于加速后续匹配")
+                except Exception as e:
+                    RuntimeLogger.log(f"提取层级映射失败: {e}", level="WARN")
+
                 RuntimeLogger.log(
                     f"层级匹配完成: {hierarchy_res.get('statistics', {})}"
                 )
@@ -362,8 +419,10 @@ class ValidationWorker(QThread):
                     # 映射 70%-95% 的区间 (耗时最长步骤之一，权重增加)
                     mapped_progress = 70 + int(p * 0.25)
                     self.progress.emit(mapped_progress, f"过程匹配: {msg}")
+                    # 扩展日志白名单，确保功能点匹配的各个阶段进度也能记录到日志文件
                     if msg and (
-                        "开始" in msg or "完成" in msg or "1/" in msg or "/100" in msg
+                        "开始" in msg or "完成" in msg or "1/" in msg or "/100" in msg 
+                        or "[PROCESS]" in msg or "阶段" in msg or "搜索" in msg or "进度" in msg
                     ):
                         RuntimeLogger.log(f"[Step 6] {msg}")
 
@@ -378,6 +437,7 @@ class ValidationWorker(QThread):
                     progress_callback=process_progress_proxy,
                     word_sections_preloaded=target_sections,  # [CORE] 数据透传
                     project_name=self.task_data["filename"],
+                    hierarchy_mapping=hierarchy_mapping, # [NEW] 传入已有的映射结果
                 )
                 v_res["process_res"] = process_res
             else:
@@ -1021,9 +1081,16 @@ class TaskCard(QFrame):
             step_text = step_names[current_idx]
             # 强化描述：如果有子步骤文字则展示，否则展示大标题
             display_text = sub_step_text if sub_step_text else step_text
-            self.status_label.setText(
-                f"正在进行: 第 {disp_step} 步 - {display_text}..."
-            )
+            
+            # [Optimization] 如果包含 [PROCESS] 标签，直接显示进度原文，增强实时感
+            if "[PROCESS]" in display_text:
+                # 提取 [PROCESS] 及其之后的内容，过滤掉前面的步骤前缀
+                start_p = display_text.find("[PROCESS]")
+                self.status_label.setText(display_text[start_p:])
+            else:
+                self.status_label.setText(
+                    f"正在进行: 第 {disp_step} 步 - {display_text}..."
+                )
             self.status_icon.setText("🔄")
 
             if value >= 100:

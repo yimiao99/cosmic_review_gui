@@ -400,9 +400,14 @@ class HierarchicalMatcher:
                         pass
 
                     # 优先使用 OutlineLevel，如果不存在则使用从编号推断的层级
+                    # 【核心修正】如果编号推断出的层级比 OutlineLevel 更深（更大），说明文档结构混乱，优先信任编号层级
                     level = (
                         outline_level if outline_level is not None else inferred_level
                     )
+                    if num_text and inferred_level > 1:
+                        # 对于 4.1, 4.1.1 这种明确的多级编号，即便样式是大纲级别1，也强制修正为其实际层级
+                        if outline_level is not None and inferred_level > outline_level:
+                            level = inferred_level
 
                     if level < 1 or level > 9:
                         continue
@@ -880,7 +885,13 @@ class HierarchicalMatcher:
 
         if mode == "flat":
             return self._extract_excel_flat(
-                df_ffill, df_raw, kwargs.get("column", 0), header_row
+                df_ffill,
+                df_raw,
+                kwargs.get("column", 0),
+                header_row,
+                l1=kwargs.get("level1_col", -1),
+                l2=kwargs.get("level2_col", -1),
+                l3=kwargs.get("level3_col", -1),
             )
         else:
             return self._extract_excel_hierarchical(
@@ -905,7 +916,14 @@ class HierarchicalMatcher:
         return False
 
     def _extract_excel_flat(
-        self, df: pd.DataFrame, df_raw: pd.DataFrame, column: int, header: int
+        self,
+        df: pd.DataFrame,
+        df_raw: pd.DataFrame,
+        column: int,
+        header: int,
+        l1: int = -1,
+        l2: int = -1,
+        l3: int = -1,
     ) -> List[Dict]:
         """提取扁平 Excel 数据，支持合并单元格范围"""
         data = []
@@ -933,6 +951,16 @@ class HierarchicalMatcher:
                 "子过程描述",
             ] or self._is_instructional_text(val):
                 continue
+
+            # 提取层级信息 (用于位置引导)
+            v1 = str(row.iloc[l1]).strip() if 0 <= l1 < len(row) else ""
+            v2 = str(row.iloc[l2]).strip() if 0 <= l2 < len(row) else ""
+            v3 = str(row.iloc[l3]).strip() if 0 <= l3 < len(row) else ""
+
+            # 清理 NaN
+            v1 = "" if v1.lower() == "nan" else v1
+            v2 = "" if v2.lower() == "nan" else v2
+            v3 = "" if v3.lower() == "nan" else v3
 
             # 检测合并范围
             end_idx = idx
@@ -965,6 +993,9 @@ class HierarchicalMatcher:
                     "text": val,
                     "row_range": row_range,
                     "row_index": idx,
+                    "level1": v1,
+                    "level2": v2,
+                    "level3": v3,
                 }
             )
 
@@ -1125,17 +1156,15 @@ class HierarchicalMatcher:
 
         text_to_match = text.strip()  # 在匹配前先清理首尾空白
 
-        # 调整模式，使单数字匹配更严格，避免匹配“4A系统”
-        # 同时支持全角点 ．
+        # [REPLACEMENT] 提取任意深度的层级编号，支持全角句点
+        # 匹配 4.1.1 或 4.1.1.1... 等，结尾支持空格、全角点、或直接结束
         patterns = [
-            r"^(\d+[\.\．]\d+[\.\．]\d+[\.\．]\d+)",  # 4.1.1.1
-            r"^(\d+[\.\．]\d+[\.\．]\d+)",  # 4.1.1
-            r"^(\d+[\.\．]\d+)",  # 4.1
-            r"^(\d+)(?=[\.\．]|\s|$)",  # 4. 或 4
+            r"^(\d+([\.\．]\d+)+)(?=[\.\．\s]|$)",  # 匹配 4.1, 4.1.1 ...
+            r"^(\d+)(?=[\.\．\s]|$)",  # 匹配 4., 4
         ]
 
         for pattern in patterns:
-            match = re.match(pattern, text_to_match)
+            match = re.search(pattern, text_to_match)  # 使用 search 配合占位符更稳
             if match:
                 level_num = match.group(1).replace("．", ".")
                 depth = level_num.count(".") + 1
@@ -1348,32 +1377,44 @@ class HierarchicalMatcher:
         full_text_search: bool = False,
         progress_callback=None,
         word_items_preloaded=None,  # [NEW] 简单匹配预置数据
+        level1_col: int = -1,
+        level2_col: int = -1,
+        level3_col: int = -1,
+        hierarchy_mapping: Dict = None,  # [NEW] 外部传入的层级匹配映射结果
     ) -> Dict:
         """简单匹配模式（单列匹配）"""
 
         # 1. 统一提取 Word 内容
         if word_items_preloaded is not None:
-            # [FIX] 转换预加载的层级数据为扁平格式
+            # [FIX] 转换预加载的层级数据为扁平格式，并保留章节隶属关系
             word_items = []
+            current_parent_title = ""
+            current_parent_num = ""
+
             for s in word_items_preloaded:
                 # 提取标题项
                 title_text = s.get("title", "")
-                if title_text:
-                    cleaned = self.basic_clean(title_text)
-                    word_items.append(
-                        {
-                            "original": title_text,
-                            "text": cleaned,
-                            "cleaned": cleaned,
-                            "in_toc": True,
-                            "level": s.get("level", 0),
-                        }
-                    )
+                chapter_num = str(s.get("num", "")).strip().rstrip(".")
+                cleaned_title = self.basic_clean(title_text)
+
+                if cleaned_title:
+                    current_parent_title = cleaned_title
+                    current_parent_num = chapter_num
+                    item = {
+                        "original": title_text,
+                        "text": cleaned_title,
+                        "cleaned": cleaned_title,
+                        "in_toc": True,
+                        "num": chapter_num,
+                        "level": s.get("level", 0),
+                        "parent_chapter": cleaned_title,
+                        "parent_num": chapter_num,
+                    }
+                    word_items.append(item)
 
                 # 如果开启了全文搜索，还需要提取内容项 (content 列表中的每一行)
                 if full_text_search:
                     content_data = s.get("content", [])
-                    # [BUGFIX] 如果 content 是字符串（DocumentProcessor 默认 join 后的结果），需要按行拆分
                     if isinstance(content_data, str):
                         content_data = content_data.split("\n")
 
@@ -1390,32 +1431,60 @@ class HierarchicalMatcher:
                                 "cleaned": cleaned_line,
                                 "in_toc": False,
                                 "level": "normal",
+                                "parent_chapter": current_parent_title,
+                                "parent_num": current_parent_num,  # 关联父章节编号
                             }
                         )
         else:
-            word_items = self.extract_word_content(
+            # 这里的 mode="flat" 提取暂时没有自带父章节功能，手动补全一下
+            word_items_raw = self.extract_word_content(
                 word_file,
                 mode="flat",
                 progress_callback=progress_callback,
                 full_text_search=full_text_search,
             )
+            word_items = []
+            curr_ch = ""
+            curr_num = ""
+            for it in word_items_raw:
+                if it.get("in_toc", True):
+                    curr_ch = it.get("text", "")
+                    # 尝试从 text 或 original 提取编号
+                    num, _ = self.extract_level_number(it.get("original", ""))
+                    curr_num = num
+                it["parent_chapter"] = curr_ch
+                it["parent_num"] = curr_num
+                word_items.append(it)
 
         if progress_callback:
             progress_callback(30, "正在读取 Excel 数据...")
 
         # 2. 统一提取 Excel 内容
         excel_data_raw = self.extract_excel_content(
-            excel_file, mode="flat", sheet_name=sheet_name, header=header, column=column
+            excel_file,
+            mode="flat",
+            sheet_name=sheet_name,
+            header=header,
+            column=column,
+            level1_col=level1_col,
+            level2_col=level2_col,
+            level3_col=level3_col,
         )
 
         # --- 去重逻辑 ---
         excel_data = []
-        seen_texts = set()
+        seen_keys = set()
         for item in excel_data_raw:
-            text = item.get("text", item.get("original", ""))
-            if text and text not in seen_texts:
+            # 强化去重：使用 (L1, L2, L3, FunctionalProcess) 作为唯一键
+            key = (
+                str(item.get("level1", "")).strip(),
+                str(item.get("level2", "")).strip(),
+                str(item.get("level3", "")).strip(),
+                str(item.get("text", item.get("original", ""))).strip(),
+            )
+            if key[3] and key not in seen_keys:
                 excel_data.append(item)
-                seen_texts.add(text)
+                seen_keys.add(key)
 
         if not word_items:
             print("错误：Word 文档中没有找到内容")
@@ -1432,52 +1501,335 @@ class HierarchicalMatcher:
         if progress_callback:
             progress_callback(30, f"开始匹配 ({len(excel_data)} 项)...")
 
+        # --- 性能优化：顺序启发式匹配 + 目录优先 + 延迟并发匹配 ---
+        print(f"正在预处理 Word 内容并构建索引...")
+        exact_lookup = {}  # 用于 O(1) 的精确匹配
+        toc_items = []  # 目录/标题项
+        chapter_buckets = {}  # [NEW] 按章节对内容进行分桶，用于快速缩小模糊匹配范围
+
+        for i, item in enumerate(word_items):
+            item["_global_idx"] = i  # 记录全局索引
+            if item.get("in_toc", True):
+                toc_items.append(item)
+
+            t_text = item.get("text", item.get("cleaned", ""))
+
+            # [NEW] 章节分桶 (增加多级索引支持)
+            p_ch = item.get("parent_chapter", "")
+            p_num = str(item.get("parent_num", "")).strip().rstrip(".")
+
+            # 使用标题和编号作为桶索引
+            buckets_to_fill = []
+            if p_ch:
+                buckets_to_fill.append(p_ch)
+            if p_num:
+                buckets_to_fill.append(p_num)
+
+            for bucket_key in buckets_to_fill:
+                if bucket_key not in chapter_buckets:
+                    chapter_buckets[bucket_key] = []
+                # 避免重复加入同一个桶
+                if item not in chapter_buckets[bucket_key]:
+                    chapter_buckets[bucket_key].append(item)
+
+            # [Optimization] 关键修复：为了支持递归搜索，将子内容向上“冒泡”到所有父级桶中
+            # 例如：4.1.1.1 的内容应该同时出现在 4.1.1.1, 4.1.1, 4.1, 4 这些桶里
+            if p_num and "." in p_num:
+                parts = p_num.split(".")
+                for i in range(1, len(parts) + 1):  # 修正：包含完整编号本身
+                    parent_key = ".".join(parts[:i])
+                    if parent_key not in chapter_buckets:
+                        chapter_buckets[parent_key] = []
+                    if item not in chapter_buckets[parent_key]:
+                        chapter_buckets[parent_key].append(item)
+
+            # 基础文本索引
+            if t_text and t_text not in exact_lookup:
+                exact_lookup[t_text] = item
+
+            # 预计算无空格文本和字符集以便模糊匹配加速
+            if "text_no_space" not in item:
+                t_no_space = re.sub(r"\s+", "", t_text.lower())
+                item["text_no_space"] = t_no_space
+                item["char_set"] = set(t_no_space)
+                if t_no_space and t_no_space not in exact_lookup:
+                    exact_lookup[t_no_space] = item
+
         exact_matched = []
         fuzzy_matched = []
         not_found_in_word = []
+        deferred_items = []  # 第一遍未匹配到的项
 
         total = len(excel_data)
+        last_found_idx = 0  # 顺序查找指针
+        current_excel_l3 = ""  # 当前追踪的 Excel 三级目录
         update_interval = max(1, total // 20)
 
-        import concurrent.futures
+        print(f"开始第一阶段：目录优先与章节限定匹配...")
+        if progress_callback:
+            progress_callback(30, "[PROCESS] 第一阶段: 目录及章节锁定匹配...")
 
+        update_interval = max(1, total // 50)
         for idx, excel_item in enumerate(excel_data):
-            if progress_callback and (idx % update_interval == 0 or idx == total - 1):
-                progress = 30 + int((idx / (total if total > 0 else 1)) * 60)
-                progress_callback(progress, f"匹配中... {idx + 1}/{total}")
+            if idx % update_interval == 0 or idx == total - 1:
+                # 这一阶段占总进度的 30% -> 60%
+                p = 30 + int((idx / (total if total > 0 else 1)) * 30)
+                msg = f"[PROCESS] 进度: {idx + 1}/{total}"  # 强化进度显示格式
+                if progress_callback:
+                    progress_callback(p, msg)
+                if idx % 50 == 0 or idx == total - 1:  # 稍微提高日志频率
+                    print(f"  {msg}")
 
-            excel_text_for_matching = self.basic_clean(excel_item["original"])
-            found, word_match, similarity_score = self.find_match(
-                excel_text_for_matching, word_items, 0
-            )
+            excel_original = excel_item["original"]
+            excel_text = self.basic_clean(excel_original)
+            excel_no_space = re.sub(r"\s+", "", excel_text.lower())
 
-            if found:
-                is_in_toc = word_match.get("in_toc", True)
-                location = "目录" if is_in_toc else "正文"
-
-                match_data = {
-                    "Excel功能点": excel_item["original"],
-                    "Word匹配项": word_match.get(
-                        "display", word_match.get("original", "")
-                    ),
-                    "位置": location,
-                    "相似度": f"{similarity_score:.2%}",
-                }
-
-                if similarity_score >= 0.99:
+            # --- 1. 【核心策略】优先在 Word 目录树中寻找 100% 匹配 ---
+            # 仅匹配 in_toc=True 的项
+            found_in_tree = False
+            for toc_item in toc_items:
+                t_text = toc_item.get("text", "")
+                t_no_space = toc_item.get("text_no_space", "")
+                if excel_text == t_text or excel_no_space == t_no_space:
+                    match_data = {
+                        "Excel功能点": excel_original,
+                        "Excel一级模块": excel_item.get("level1", ""),
+                        "Excel二级模块": excel_item.get("level2", ""),
+                        "Excel三级模块": excel_item.get("level3", ""),
+                        "Word匹配项": toc_item.get(
+                            "display", toc_item.get("original", "")
+                        ),
+                        "位置": "目录(100%匹配)",
+                        "相似度": "100.00%",
+                    }
                     exact_matched.append(match_data)
+                    last_found_idx = toc_item["_global_idx"]
+                    found_in_tree = True
+                    break
+
+            if found_in_tree:
+                continue
+
+            # --- 2. 【核心策略】层级引导：根据 Excel 模块确定章节范围 ---
+            l_target_name = ""
+            if hierarchy_mapping:
+                key = (
+                    excel_item.get("level1", ""),
+                    excel_item.get("level2", ""),
+                    excel_item.get("level3", ""),
+                )
+                if key in hierarchy_mapping:
+                    l_target_name = hierarchy_mapping[key]
+
+            if not l_target_name:
+                for l_key in ["level3", "level2", "level1"]:
+                    l_val = excel_item.get(l_key, "")
+                    if l_val:
+                        l_target_name = l_val
+                        break
+
+            if l_target_name and l_target_name != current_excel_l3:
+                current_excel_l3 = l_target_name
+                l_clean = self.basic_clean(l_target_name)
+                # 尝试通过文本定位该章节
+                l_match = exact_lookup.get(l_clean)
+                if not l_match:
+                    # 尝试通过编号定位该章节 (比如 Excel L3 叫 "4.1.1.1 服务列表"，而 Word 目录项分离了编号)
+                    p_num_match = re.match(r"^(\d+[\.\d]*)", l_target_name)
+                    if p_num_match:
+                        l_match = exact_lookup.get(p_num_match.group(1))
+
+                if not l_match:
+                    f_found, f_match, f_score = self.find_match(l_clean, toc_items, 0)
+                    if f_found and f_score > 0.88:
+                        l_match = f_match
+
+                if l_match:
+                    last_found_idx = l_match["_global_idx"]
+
+            # --- 3. 【核心策略】在当前或关联章节内进行局部搜索 ---
+            # 支持通过 标题文本 或 章节编号 查找桶
+            l_target_clean = self.basic_clean(l_target_name) if l_target_name else ""
+            l_target_num = ""
+            num_m = (
+                re.match(r"^(\d+[\.\d]*)", str(l_target_name))
+                if l_target_name
+                else None
+            )
+            if num_m:
+                l_target_num = num_m.group(1).rstrip(".")
+
+            chapter_candidates = []
+            # 强化分桶检索：优先使用编号精确定位
+            if l_target_num and l_target_num in chapter_buckets:
+                chapter_candidates = chapter_buckets[l_target_num]
+            elif l_target_clean and l_target_clean in chapter_buckets:
+                chapter_candidates = chapter_buckets[l_target_clean]
+
+            if chapter_candidates:
+                # [Strategy] 在限定章节内，先通过 simple index 进行 100% 匹配尝试
+                for cand in chapter_candidates:
+                    c_text = cand.get("text", "")
+                    c_no_space = cand.get("text_no_space", "")
+                    if excel_text == c_text or excel_no_space == c_no_space:
+                        match_data = {
+                            "Excel功能点": excel_original,
+                            "Excel一级模块": excel_item.get("level1", ""),
+                            "Excel二级模块": excel_item.get("level2", ""),
+                            "Excel三级模块": excel_item.get("level3", ""),
+                            "Word匹配项": cand.get("display", cand.get("original", "")),
+                            "位置": f"章节内-正文({l_target_num or l_target_name[:5]})",  # 补回正文关键字以便统计
+                            "相似度": "100.00%",
+                        }
+                        exact_matched.append(match_data)
+                        last_found_idx = cand["_global_idx"]
+                        found_in_tree = True
+                        break
+
+                if found_in_tree:
+                    continue
+
+                # [Optimization] 如果没有 100% 匹配，再调用 find_match 进行模糊匹配（放宽阈值）
+                found_ch, ch_match, ch_score = self.find_match(
+                    excel_text, chapter_candidates, 0, chapter_locked=True
+                )
+                if found_ch:
+                    match_data = {
+                        "Excel功能点": excel_original,
+                        "Excel一级模块": excel_item.get("level1", ""),
+                        "Excel二级模块": excel_item.get("level2", ""),
+                        "Excel三级模块": excel_item.get("level3", ""),
+                        "Word匹配项": ch_match.get(
+                            "display", ch_match.get("original", "")
+                        ),
+                        "位置": f"章节内({l_target_num or l_target_name[:5]})",
+                        "相似度": f"{ch_score:.2%}",
+                    }
+                    if ch_score >= 0.99:
+                        exact_matched.append(match_data)
+                    else:
+                        fuzzy_matched.append(match_data)
+                    last_found_idx = ch_match["_global_idx"]
+                    continue
+
+            # --- 4. 第一阶段未中，记为延期，进入第二阶段汇总搜索 ---
+            deferred_items.append(excel_item)
+
+        # 第二阶段：延期全局搜索 (优先匹配 2.2 和 4.* 章节)
+        if deferred_items:
+            deferred_total = len(deferred_items)
+            print(f"第一阶段未匹配 {deferred_total} 项，开始深度全局搜索...")
+            if progress_callback:
+                progress_callback(
+                    60, f"[PROCESS] 阶段二: 核心章节与深度搜索 ({deferred_total}项)..."
+                )
+
+            # 预识别特殊章节内容 (2.2 系统已实现功能 和 4.* 功能需求)
+            priority_candidates = []
+            for item in word_items:
+                p_num = str(item.get("parent_num", ""))
+                # 匹配 2.2 或 4.* 章节的内容
+                if p_num == "2.2" or p_num.startswith("4"):
+                    priority_candidates.append(item)
                 else:
-                    fuzzy_matched.append(match_data)
-            else:
-                match_data = {
-                    "Excel功能点": excel_item["original"],
-                    "状态": "[FAIL] 缺失",
-                    "简略描述": f"拆分表{excel_item['original']}在需求规格书未体现",
-                }
-                not_found_in_word.append(match_data)
+                    # 备选：如果编号没提取到，检查标题文字（兜底）
+                    p_ch = item.get("parent_chapter", "")
+                    if "系统已实现功能" in p_ch or "功能需求" in p_ch:
+                        priority_candidates.append(item)
+
+            import concurrent.futures
+            from threading import Lock
+
+            results_lock = Lock()
+
+            def process_deferred_item(d_item):
+                try:
+                    d_original = d_item["original"]
+                    d_text = self.basic_clean(d_original)
+
+                    # A. 优先在 [2.2系统已实现功能] 和 [4 功能需求] 中搜
+                    found_p, word_p, score_p = (
+                        self.find_match(d_text, priority_candidates, 0)
+                        if priority_candidates
+                        else (False, None, 0.0)
+                    )
+
+                    if found_p and score_p > 0.85:
+                        with results_lock:
+                            match_data = {
+                                "Excel功能点": d_original,
+                                "Excel一级模块": d_item.get("level1", ""),
+                                "Excel二级模块": d_item.get("level2", ""),
+                                "Excel三级模块": d_item.get("level3", ""),
+                                "Word匹配项": word_p.get(
+                                    "display", word_p.get("original", "")
+                                ),
+                                "位置": "核心章节搜索",
+                                "相似度": f"{score_p:.2%}",
+                            }
+                            if score_p >= 0.99:
+                                exact_matched.append(match_data)
+                            else:
+                                fuzzy_matched.append(match_data)
+                        return
+
+                    # B. 兜底：全书全局搜索
+                    found_g, word_g, score_g = self.find_match(d_text, word_items, 0)
+
+                    with results_lock:
+                        if found_g and score_g > 0.8:
+                            match_data = {
+                                "Excel功能点": d_original,
+                                "Excel一级模块": d_item.get("level1", ""),
+                                "Excel二级模块": d_item.get("level2", ""),
+                                "Excel三级模块": d_item.get("level3", ""),
+                                "Word匹配项": word_g.get(
+                                    "display", word_g.get("original", "")
+                                ),
+                                "位置": "全局搜索",
+                                "相似度": f"{score_g:.2%}",
+                            }
+                            if score_g >= 0.99:
+                                exact_matched.append(match_data)
+                            else:
+                                fuzzy_matched.append(match_data)
+                        else:
+                            not_found_in_word.append(
+                                {
+                                    "Excel功能点": d_original,
+                                    "Excel一级模块": d_item.get("level1", ""),
+                                    "Excel二级模块": d_item.get("level2", ""),
+                                    "Excel三级模块": d_item.get("level3", ""),
+                                    "状态": "[FAIL] 缺失",
+                                    "简略描述": "全书匹配未找到",
+                                }
+                            )
+                except Exception as e:
+                    print(f"Error in process_deferred_item: {e}")
+
+            # 并发执行深度搜索
+            max_workers = 4  # 略微增加并发
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                futures = [
+                    executor.submit(process_deferred_item, di) for di in deferred_items
+                ]
+                comp = 0
+                for _ in concurrent.futures.as_completed(futures):
+                    comp += 1
+                    # 深度搜索耗时较长，增加汇报频率
+                    if comp % 5 == 0 or comp == deferred_total:
+                        p = 60 + int((comp / deferred_total) * 30)
+                        msg = f"[PROCESS] 深度搜索进度: {comp}/{deferred_total}"
+                        if progress_callback:
+                            progress_callback(p, msg)
+                        # 同时打印到 stdout 以便 RuntimeLogger 实时记录
+                        if comp % 20 == 0 or comp == deferred_total:
+                            print(f"  {msg}")
 
         if progress_callback:
-            progress_callback(90, "生成统计报告...")
+            progress_callback(90, "正在汇总报告...")
 
         total_excel = len(excel_data)
         exact_count = len(exact_matched)
@@ -1490,17 +1842,18 @@ class HierarchicalMatcher:
             f"\n匹配完成：精确 {exact_count} 项，模糊 {fuzzy_count} 项，缺失 {missing_count} 项"
         )
         if full_text_search:
+            # 统计包含某关键词的所有位置
             toc_count = sum(
                 1
                 for item in exact_matched + fuzzy_matched
-                if item.get("位置") == "目录"
+                if "目录" in item.get("位置", "")
             )
             body_count = sum(
                 1
                 for item in exact_matched + fuzzy_matched
-                if item.get("位置") == "正文"
+                if "正文" in item.get("位置", "")
             )
-            print(f"  其中：目录中 {toc_count} 项，正文中 {body_count} 项")
+            print(f"  其中：目录相关 {toc_count} 项，正文相关 {body_count} 项")
 
         # 移除过多的终端打印，保持界面干净
         if progress_callback:
@@ -1529,129 +1882,150 @@ class HierarchicalMatcher:
         return report
 
     def similarity(self, a: str, b: str) -> float:
-        """计算两个字符串的相似度"""
-        a_norm = a.lower()
-        b_norm = b.lower()
+        """使用 RapidFuzz 计算相似度，比 SequenceMatcher 准确且快"""
+        if not a or not b:
+            return 0.0
 
-        # 如果开启了模糊匹配，对常见近义词进行归一化处理（仅用于相似度衡量）
-        if self.fuzzy_match:
-            a_norm = a_norm.replace("账户", "账号")
-            b_norm = b_norm.replace("账户", "账号")
+        # 归一化处理
+        a_norm = a.lower().replace("账户", "账号")
+        b_norm = b.lower().replace("账户", "账号")
 
-        return SequenceMatcher(None, a_norm, b_norm).ratio()
+        try:
+            from rapidfuzz import fuzz
+
+            # 使用 token_sort_ratio 忽略词序影响，或者 partial_ratio 处理子集
+            # 对于功能点匹配，partial_ratio 通常更友好
+            ratio1 = fuzz.ratio(a_norm, b_norm)
+            ratio2 = fuzz.partial_ratio(a_norm, b_norm)
+            # 取两者最大值
+            return max(ratio1, ratio2) / 100.0
+        except ImportError:
+            return SequenceMatcher(None, a_norm, b_norm).ratio()
 
     def find_match(
-        self, target: str, candidates: List[Dict], target_depth: int = 0
+        self,
+        target: str,
+        candidates: List[Dict],
+        target_depth: int = 0,
+        chapter_locked: bool = False,
     ) -> Tuple[bool, Dict, float]:
         """
         在候选集中查找最佳匹配项。
-        不仅比较相似度，还在得分相同时优先选择目录项或标题项。
+        chapter_locked: 是否是章节限定搜索，若是则放宽阈值。
         """
+        if not target or not candidates:
+            return False, None, 0.0
+
         best_match = None
         best_score = -1.0
-        best_quality = -1  # 用于打破得分平局的质量分
+        best_quality = -1
 
-        # 预处理：去除目标字符串的所有空格（用于比较）
-        if target is None:
-            target = ""
+        # 1. 预处理目标
         target_no_space = re.sub(r"\s+", "", str(target).lower())
-
-        # 预处理：目标字符集（用于快筛）
         target_chars = set(target_no_space)
         target_len = len(target_no_space)
 
+        # 2. 只有在候选集较大时才启用高性能快筛
+        use_fast_pruning = len(candidates) > 1000
+
         for candidate in candidates:
-            # 优化 1：缓存无空格文本及字符集
-            candidate_no_space = candidate.get("text_no_space")
-            candidate_text = candidate.get("text", candidate.get("cleaned", ""))
+            cand_text = candidate.get("text", candidate.get("cleaned", ""))
+            if not cand_text:
+                continue
 
-            if candidate_no_space is None:
-                candidate_no_space = re.sub(r"\s+", "", candidate_text.lower())
-                candidate["text_no_space"] = candidate_no_space
-                candidate["char_set"] = set(candidate_no_space)
+            cand_no_space = candidate.get("text_no_space")
+            if cand_no_space is None:
+                cand_no_space = re.sub(r"\s+", "", cand_text.lower())
+                candidate["text_no_space"] = cand_no_space
+                candidate["char_set"] = set(cand_no_space)
 
-            candidate_chars = candidate.get("char_set")
-            if candidate_chars is None:
-                candidate_chars = set(candidate_no_space)
-                candidate["char_set"] = candidate_chars
+            cand_len = len(cand_no_space)
 
-            # 优化 2：【重点】字集快筛 (Fast Jaccard-like filter)
-            # 如果目标较长，且两者字符重合度极低，直接跳过昂贵的相似度计算
-            if target_len > 5:
-                overlap = len(target_chars.intersection(candidate_chars))
-                # 经验阈值：字符重合率低于 30% 且不包含全字，通常相似度无法达到 0.7
-                if (
-                    overlap / target_len < 0.3
-                    and target_no_space not in candidate_no_space
-                ):
-                    continue
+            # 如果字数相差过大且在非章节锁定模式下，跳过
+            if not chapter_locked and use_fast_pruning:
+                if cand_len > target_len * 10 or target_len > cand_len * 10:
+                    if (
+                        target_no_space not in cand_no_space
+                        and cand_no_space not in target_no_space
+                    ):
+                        continue
 
-            # 1. 精确匹配（带空格）
-            if target == candidate_text:
+            # 3. 相似度计算
+            if target == cand_text or target_no_space == cand_no_space:
                 current_score = 1.0
-            # 2. 精确匹配（忽略空格）
-            elif target_no_space == candidate_no_space:
-                current_score = 0.995
-            # 3. 模糊匹配
+            elif target_no_space in cand_no_space or cand_no_space in target_no_space:
+                # 包含关系逻辑优化：根据包含的方向和长度比例给予不同的高分
+                if target_no_space in cand_no_space:
+                    # 目标在候选者中 (更具体的匹配，例如：展示服务列表 -> 展示服务列表时序图)
+                    len_ratio = len(target_no_space) / len(cand_no_space)
+                    current_score = 0.96 + (0.03 * len_ratio)  # 0.96 ~ 0.99
+                else:
+                    # 候选者在目标中 (更笼统的匹配，例如：展示服务列表 -> 服务列表)
+                    len_ratio = len(cand_no_space) / len(target_no_space)
+                    current_score = 0.91 + (0.04 * len_ratio)  # 0.91 ~ 0.95
             elif self.fuzzy_match:
-                score_with_space = self.similarity(target, candidate_text)
-                score_no_space = self.similarity(target_no_space, candidate_no_space)
-                current_score = max(score_with_space, score_no_space)
+                current_score = self.similarity(target_no_space, cand_no_space)
+            else:
+                current_score = 0.0
 
-            # 4. 包含关系匹配 (子串/前缀奖励)
-            if len(target_no_space) >= 3:
-                # 情况 A: Target 是 Candidate 的前缀
-                if candidate_no_space.startswith(target_no_space):
-                    current_score = max(current_score, 0.985)
-                # 情况 B: Candidate 以 Target 开头，但中间可能有微小字符差异
-                elif (
-                    self.similarity(
-                        target_no_space, candidate_no_space[: len(target_no_space)]
-                    )
-                    > 0.9
-                ):
-                    current_score = max(current_score, 0.95)
-                # 情况 C: Target 包含在 Candidate 中
-                elif target_no_space in candidate_no_space:
-                    overlap_ratio = len(target_no_space) / len(candidate_no_space)
-                    current_score = max(current_score, 0.85, overlap_ratio)
+            # 章节锁定模式下阈值降低
+            effective_threshold = 0.75 if chapter_locked else self.threshold
+            if target_depth > 0:
+                effective_threshold = 0.7
 
-            # 只有达到阈值才考虑
-            if current_score >= self.threshold:
-                # 计算质量分用于打破平局
-                # 质量分权重：在目录中 +10, 是标题 +5, 长度匹配度 (0.0~1.0)
+            if current_score >= effective_threshold:
                 quality = 0
+                # 如果是标题，给予权重，但如果相似度完全一样，正文中的长匹配通常更优(针对功能过程)
                 if candidate.get("in_toc"):
-                    quality += 10
+                    quality += 5  # 降低权重，从 10 降到 5
 
-                style = str(candidate.get("level", "")).lower()
-                if "heading" in style or "标题" in style:
-                    quality += 5
-
-                # 长度匹配度：目标长度与候选长度越接近越好 (避免长段落包含短词导致的误匹配)
-                len_ratio = min(len(target_no_space), len(candidate_no_space)) / max(
-                    len(target_no_space), len(candidate_no_space)
+                # 长度匹配度 (0~1)
+                len_ratio = (
+                    min(target_len, cand_len) / max(target_len, cand_len)
+                    if max(target_len, cand_len) > 0
+                    else 0
                 )
 
-                # 总比较逻辑：优先看相似度，相似度极近时看质量分
-                # 使用一个小增量 epsilon 来判断相似度是否“基本相等”
+                # [Optimization] 如果是包含关系, 则权重倾向于长度更接近的一方
+                # 避免 "服务列表" (Heading) 抢掉 "展示服务列表 (新增)" (Body) 的匹配
+                current_quality = quality + len_ratio * 10
+
+                # [Depth Preference] 深度契合权重 (解决同名不同层级匹配问题)
+                if target_depth > 0:
+                    cand_depth = candidate.get("depth", candidate.get("level", 0))
+                    # 匹配层级级别 (L1->2, L2->3, L3->4+)
+                    if cand_depth == target_depth:
+                        current_quality += 8  # 匹配深度大幅提权
+                    elif cand_depth > target_depth:
+                        current_quality += 4  # 深度更深优于更浅
+                    elif cand_depth < target_depth:
+                        current_quality -= 5  # 深度不足降权
+
                 if current_score > best_score + 1e-5:
                     best_score = current_score
                     best_match = candidate
-                    best_quality = quality + len_ratio
+                    best_quality = current_quality
                 elif abs(current_score - best_score) <= 1e-5:
-                    if (quality + len_ratio) > best_quality:
+                    if (current_quality) > best_quality:
                         best_score = current_score
                         best_match = candidate
-                        best_quality = quality + len_ratio
+                        best_quality = current_quality
 
-        if best_match and best_score >= self.threshold:
-            return True, best_match, best_score
+            # 移除过早的 break，确保在全文档范围内寻找真正最优的匹配项 (解决用户提到的“不继续往下看”的问题)
+            # if best_score > 0.99 and best_quality > 15:
+            #     break
 
-        return False, {}, 0.0
+        effective_threshold = 0.75 if chapter_locked else self.threshold
+        if target_depth > 0:
+            effective_threshold = 0.7
+
+        return (
+            (best_score >= effective_threshold),
+            (best_match if best_match else {}),
+            (best_score if best_score > 0 else 0.0),
+        )
 
     # 简单匹配模式的 match_documents 方法保持不变，因为它与层级匹配不同
-    # 它的逻辑已经包含在原始代码中，这里不再重复
 
     def match_hierarchical_documents(
         self,
@@ -1895,7 +2269,10 @@ class HierarchicalMatcher:
         for idx, excel_row in enumerate(excel_data):
             if progress_callback and (idx % u_interval == 0 or idx == total - 1):
                 progress = 30 + int((idx / (total if total > 0 else 1)) * 60)
-                progress_callback(progress, f"层级匹配中... {idx + 1}/{total}")
+                msg = f"[PROCESS] 进度: {idx + 1}/{total}"
+                progress_callback(progress, msg)
+                if idx % 50 == 0 or idx == total - 1:
+                    print(f"  {msg}")
 
             # --- 内部辅助函数保持逻辑一致 ---
             def is_descendant(parent_num, child_num):
@@ -1927,7 +2304,8 @@ class HierarchicalMatcher:
             l3_best_match_item = None
             l3_best_score = 0.0
 
-            # 2. 逐级比对 (L1 -> L2 -> L3)
+            # 2. 逐级比对 (L1 -> L2 -> L3) - 改进：引入父级上下文约束，解决重名项匹配到错误层级的问题
+            # 2.1 匹配 L1
             if excel_row["level1"]:
                 found, match, score = self.find_match(excel_row["level1"], l1_space)
                 if found and score >= self.threshold:
@@ -1940,8 +2318,30 @@ class HierarchicalMatcher:
                 else:
                     word_l1_title = "❌ 缺失"
 
+            # 2.2 匹配 L2 (优先在 L1 的子项中寻找)
             if excel_row["level2"]:
-                found, match, score = self.find_match(excel_row["level2"], l2_space)
+                # 尝试约束搜索空间
+                l2_candidates = l2_space
+                if l1_matched_flag and word_l1_num:
+                    constrained = [
+                        c
+                        for c in l2_space
+                        if is_descendant(word_l1_num, c.get("number", ""))
+                        and c.get("number") != word_l1_num
+                    ]
+                    if constrained:
+                        l2_candidates = constrained
+
+                found, match, score = self.find_match(
+                    excel_row["level2"], l2_candidates, target_depth=3
+                )
+
+                # 如果约束搜索失败且存在约束，尝试全局搜索（可能是 L1 匹配错了）
+                if not found and l2_candidates is not l2_space:
+                    found, match, score = self.find_match(
+                        excel_row["level2"], l2_space, target_depth=3
+                    )
+
                 if found and score >= self.threshold:
                     l2_matched_flag, l2_score = True, score
                     word_l2_title, word_l2_num, l2_matched_depth = (
@@ -1952,8 +2352,42 @@ class HierarchicalMatcher:
                 else:
                     word_l2_title = "❌ 缺失"
 
+            # 2.3 匹配 L3 (优先在 L2 或 L1 的子项中寻找)
             if excel_row["level3"]:
-                found, match, score = self.find_match(excel_row["level3"], l3_space)
+                l3_candidates = l3_space
+                # 优先级排序：L2子项 > L1子项 > 全局
+                parent_num = (
+                    word_l2_num
+                    if (l2_matched_flag and word_l2_num)
+                    else (word_l1_num if (l1_matched_flag and word_l1_num) else None)
+                )
+
+                if parent_num:
+                    constrained = [
+                        c
+                        for c in l3_space
+                        if is_descendant(parent_num, c.get("number", ""))
+                        and c.get("number") not in [word_l1_num, word_l2_num]
+                    ]
+                    if constrained:
+                        l3_candidates = constrained
+
+                found, match, score = self.find_match(
+                    excel_row["level3"], l3_candidates, target_depth=4
+                )
+
+                # 如果约束搜索没有获得足够好的结果，且存在更优的全局匹配项，则尝试全局
+                # 注意：这里如果约束匹配已经 100% 就不必全局了
+                if (not found or score < 0.99) and l3_candidates is not l3_space:
+                    g_found, g_match, g_score = self.find_match(
+                        excel_row["level3"], l3_space, target_depth=4
+                    )
+                    # 如果全局有且显著优于约束匹配（或者约束匹配未找到），则可能需要考虑全局
+                    # 但为了解决用户提到的“重名但层级不同”的问题，如果约束内能找到且分数不低，应优先保留约束内的
+                    if g_found and (not found or g_score > score + 0.1):
+                        # 如果全局匹配的项确实能解决层级问题，或者约束匹配实在太差
+                        found, match, score = g_found, g_match, g_score
+
                 if found and score >= self.threshold:
                     l3_matched_flag, l3_best_match_item, l3_best_score = (
                         True,
@@ -2162,7 +2596,39 @@ class HierarchicalMatcher:
                 not_found_in_word.append(data)
 
         if progress_callback:
-            progress_callback(90, "生成统计报告...")
+            progress_callback(90, "层级深度校验与汇总...")
+
+        # --- 深度搜索兜底 (针对未匹配或层级不匹配项) ---
+        # 如果通过率不是 100%，尝试进行全书内容查找
+        unsolved_items = not_found_in_word + hierarchy_mismatched
+        if unsolved_items:
+            print(
+                f"层级匹配未达 100% ({len(unsolved_items)} 项待处理)，启动章节内容关联匹配..."
+            )
+            # 建立 Word 全文索引 (包含非标题内容，用于兜底)
+            # 这里我们复用 word_hierarchy 中的 level3 桶，或者全量 items
+
+            for item in unsolved_items:
+                # 尝试对三级模块进行全局模糊查找
+                target_text = self.basic_clean(item["Excel三级模块"])
+                if not target_text:
+                    continue
+
+                # 查找最佳匹配
+                found, word_item, score = self.find_match(target_text, all_items, 0)
+                if found and score >= 0.85:
+                    item["Word匹配项(兜底)"] = word_item.get("display", "")
+                    item["匹配位置"] = "正文/其他章节"
+                    item["相似度"] = f"{score:.2%}"
+                    # 不修改原始 match_status，但增加描述信息
+                    if item["匹配状态"] == "缺失":
+                        item["简略描述"] = (
+                            f"目录缺失但在文档其他位置找到相关项：{word_item.get('display')}"
+                        )
+                    else:
+                        item[
+                            "简略描述"
+                        ] += f" (内容已在 {word_item.get('display')} 找到)"
 
         total_excel = len(excel_data)
         exact_count = len(exact_matched)
@@ -2254,6 +2720,9 @@ class HierarchicalMatcher:
 
                     # 定义简单匹配报告的列顺序
                     simple_column_order = [
+                        "Excel一级模块",
+                        "Excel二级模块",
+                        "Excel三级模块",
                         "Excel功能点",
                         "Word匹配项",
                         "位置",
@@ -2263,28 +2732,16 @@ class HierarchicalMatcher:
                     ]
 
                     # 检查报告类型以确定列顺序
-                    is_hierarchical_report = (
-                        bool(
-                            report["exact_matched"]
-                            and "Excel一级模块" in report["exact_matched"][0]
-                        )
-                        or bool(
-                            report["fuzzy_matched"]
-                            and "Excel一级模块" in report["fuzzy_matched"][0]
-                        )
-                        or bool(
-                            report.get("hierarchy_mismatched")
-                            and "Excel一级模块" in report["hierarchy_mismatched"][0]
-                        )
-                        or bool(
-                            report["not_found_in_word"]
-                            and "Excel一级模块" in report["not_found_in_word"][0]
-                        )
+                    # Node 5 层级匹配特有列: Word一级标题
+                    # Node 6 功能过程特有列: Excel功能点
+                    is_node5_report = any(
+                        "Word一级标题" in (report[k][0] if report.get(k) else {})
+                        for k in ["exact_matched", "fuzzy_matched"]
                     )
 
                     current_column_order = (
                         hierarchical_column_order
-                        if is_hierarchical_report
+                        if is_node5_report
                         else simple_column_order
                     )
 
@@ -2335,7 +2792,7 @@ class HierarchicalMatcher:
                                 item["匹配状态"] = "层级不匹配"
                             failed_hierarchical_data.append(item)
 
-                    if report.get("not_found_in_word") and is_hierarchical_report:
+                    if report.get("not_found_in_word") and is_node5_report:
                         for item in report["not_found_in_word"]:
                             if "匹配状态" not in item:
                                 item["匹配状态"] = "缺失"
@@ -2353,7 +2810,7 @@ class HierarchicalMatcher:
                         failed_df.to_excel(
                             writer, sheet_name="❌ 缺失及层级不匹配", index=False
                         )
-                    elif is_hierarchical_report:
+                    elif is_node5_report:
                         empty_df = pd.DataFrame(
                             [{"说明": "🎉 恭喜！未发现缺失或层级不匹配项！"}]
                         )
@@ -2362,7 +2819,7 @@ class HierarchicalMatcher:
                         )
 
                     # 简单模式下的缺失处理（非层级报告）
-                    if report["not_found_in_word"] and not is_hierarchical_report:
+                    if report["not_found_in_word"] and not is_node5_report:
                         for item in report["not_found_in_word"]:
                             if "匹配状态" not in item:
                                 item["匹配状态"] = "缺失"
@@ -2377,7 +2834,7 @@ class HierarchicalMatcher:
                             ]
                         ]
                         missing_df.to_excel(writer, sheet_name="❌ 缺失", index=False)
-                    elif not is_hierarchical_report:
+                    elif not is_node5_report:
                         empty_df = pd.DataFrame([{"说明": "🎉 恭喜！未发现缺失模块！"}])
                         empty_df.to_excel(writer, sheet_name="❌ 缺失", index=False)
 
