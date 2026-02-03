@@ -316,14 +316,15 @@ class StepsWidget(QWidget):
 
         self.step_nodes = []
         self.step_lines = []
-        for i, (label, status) in enumerate(steps_data, 1):
+        # 改为从 0 开始编号，支持节点 0
+        for i, (label, status) in enumerate(steps_data, 0):
             node = StepNode(i, label, status)
             node.node_clicked.connect(self.node_clicked.emit)
             node.label_clicked.connect(self.label_clicked.emit)
             self.step_nodes.append(node)
             container_layout.addWidget(node)
 
-            if i < len(steps_data):
+            if i < len(steps_data) - 1:
                 line = StepLine()
                 self.step_lines.append(line)
                 # 采用顶对齐，具体坐标由 StepLine 内部 y_offset 补偿对齐圆心
@@ -340,13 +341,13 @@ class StepsWidget(QWidget):
         if total_val >= 99.8:
             total_val = 100.0
 
-        # 采用与 ValidationWorker 任务分配点一致的非线性分段 (优化权重：给耗时长的步骤 [模板/层级/过程] 更多空间)
-        # 1->2 (30%), 2->3 (3%), 3->4 (3%), 4->5 (3%), 5->6 (31%), 6->7 (25%)
-        breakpoints = [0, 30, 33, 36, 39, 70, 95]
+        # 采用与 ValidationWorker 任务分配点一致的非线性分段 (优化权重)
+        # 0:环境准备(0-15), 1:模板(15-30), 2:空值(30-33), 3:比例(33-36), 4:因子(36-39), 5:层级(39-70), 6:过程(70-95), 7:移动(95-100)
+        breakpoints = [0, 15, 30, 33, 36, 39, 70, 95, 100]
 
         for i, line in enumerate(self.step_lines):
             if i >= len(breakpoints) - 1:
-                # 兜底处理：如果线段多于断点，剩下的平分 96-100
+                # 兜底处理
                 start_progress = 96
                 end_progress = 100
             else:
@@ -383,9 +384,9 @@ class StepsWidget(QWidget):
                 node.update_status(node.status)  # 触发颜色与对比度重算
 
     def set_step_status(self, step_num, status):
-        """更新指定步骤的状态 (1-indexed)"""
-        if 1 <= step_num <= len(self.step_nodes):
-            node = self.step_nodes[step_num - 1]
+        """更新指定步骤的状态 (0-indexed)"""
+        if 0 <= step_num < len(self.step_nodes):
+            node = self.step_nodes[step_num]
             node.update_status(status)
             # 如果是完成状态，清除进度显示
             if status in ["done", "fail", "warn", "finished"]:
@@ -393,19 +394,16 @@ class StepsWidget(QWidget):
                 node.circle.update()
 
     def set_step_progress(self, step_num, progress):
-        """更新指定步骤的进度 (1-indexed)"""
-        if 1 <= step_num <= len(self.step_nodes):
+        """更新指定步骤的进度 (0-indexed)"""
+        if 0 <= step_num < len(self.step_nodes):
             # 遍历所有节点，确保只有当前节点在转
             for i, node in enumerate(self.step_nodes):
-                curr_idx = i + 1
-                if curr_idx == step_num:
+                if i == step_num:
                     node.set_progress(progress)
                 else:
-                    # 非当前节点：如果是在进行中，强制回归 pending 或保持之前的结果状态
-                    # 关键是清除它们的进度数值，防止画出环
+                    # 非当前节点
                     node.circle.progress = 0
                     if node.status == "processing":
-                        # 只有在还没有进入最终状态(done/fail/warn/finished)时才重置
                         node.status = "pending"
                         node.circle.status = "pending"
                     node.update()

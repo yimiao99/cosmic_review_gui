@@ -9,7 +9,7 @@ Word 文档目录与 Excel 表格匹配工具 - GUI 版本
 import os
 import tkinter as tk
 import time
-from datetime import timedelta
+from datetime import datetime
 from tkinter import filedialog, messagebox, ttk, scrolledtext
 
 try:

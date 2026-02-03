@@ -45,19 +45,41 @@ class SimilarityChecker:
         # 1. 索引目标文档 (支持模糊匹配标题末尾部分)
         # 用标题核心词做 key，解决 1. > 1.1 分级路径导致无法匹配的问题
         target_lookup = {}
+        target_level_map = {}  # 新增：记录标题层级
+
         for s in target_sections:
-            # 兼容性修复：优先使用 title，退而求其次使用 display 或 cleaned
-            t_title = s.get("title", s.get("display", s.get("cleaned", "")))
+            if not s:
+                continue
+            # [FIX] 彻底解决 AttributeError: 'str' object has no attribute 'get'
+            if isinstance(s, str):
+                t_title = s
+                t_level = 2  # 默认
+            else:
+                # 兼容性修复：优先使用 title，退而求其次使用 display 或 cleaned
+                t_title = s.get("title", s.get("display", s.get("cleaned", "")))
+                t_level = s.get("level", 2)
+
             if t_title:
-                target_lookup[clean_text(t_title)] = s
+                clean_t = clean_text(t_title)
+                target_lookup[clean_t] = s
+                target_level_map[clean_t] = t_level
 
         # 2. 索引模板内容 (作为参考库)
         template_content_map = {}
         if template_sections:
             for s in template_sections:
-                tm_title = s.get("title", s.get("display", s.get("cleaned", "")))
+                if not s:
+                    continue
+                # [FIX] 同步修复模板提取结果
+                if isinstance(s, str):
+                    tm_title = s
+                else:
+                    tm_title = s.get("title", s.get("display", s.get("cleaned", "")))
+
                 if tm_title:
-                    template_content_map[clean_text(tm_title)] = s.get("content", "")
+                    template_content_map[clean_text(tm_title)] = (
+                        s.get("content", "") if isinstance(s, dict) else ""
+                    )
 
         results = {
             "is_valid": True,
@@ -71,6 +93,41 @@ class SimilarityChecker:
         for m in cls.REQUIRED_WORD_MODULES:
             m_clean = clean_text(m)
             target = target_lookup.get(m_clean)
+
+            # [NEW] 增强匹配逻辑：解决“功能需求”等项目特化标题导致缺失的问题
+            if not target:
+                # A. 针对“功能需求1”等包含指令文字的模块，通过包含关系匹配
+                if "功能需求" in m_clean:
+                    # 尝试在 target_lookup 中找包含“功能”的 level 2/3 标题
+                    for t_key, t_val in target_lookup.items():
+                        if "功能" in t_key and target_level_map.get(t_key) >= 2:
+                            # 只要包含“功能”且是二级及以下标题，且还没被其他必填项占用，就尝试匹配
+                            # 这能大幅减少由于“流量控制平台”等实际业务标题导致的缺失误报
+                            target = t_val
+                            break
+                # B. 针对其他可能的同义词
+                synonyms = {
+                    "总体描述": ["项目概述", "项目简介", "总体说明"],
+                    "建设目标": ["建设内容", "建设思路"],
+                    "功能架构图": ["系统架构图", "技术架构图", "功能架构"],
+                    "质量及特性": [
+                        "非功能性需求",
+                        "性能需求",
+                        "非功能需求",
+                        "质量需求",
+                    ],
+                    "功能需求": [
+                        "系统功能需求",
+                        "业务功能需求",
+                        "功能说明",
+                        "主要功能",
+                    ],
+                }
+                if not target and m_clean in synonyms:
+                    for syn in synonyms[m_clean]:
+                        if syn in target_lookup:
+                            target = target_lookup[syn]
+                            break
 
             # 层级计算 (仅为 UI 展示)
             num_match = re.match(r"^(\d+(\.\d+)*)\.?\s*", m)
@@ -315,7 +372,7 @@ class SimilarityChecker:
         excel_set = set(excel_cleans)
         word_cleans = [clean_title(wm) for wm in word_modules]
         word_set = set(word_cleans)
-        
+
         # 3. 双向比对
         # Word -> Excel
         for wm, wm_clean in zip(word_modules, word_cleans):
@@ -323,7 +380,7 @@ class SimilarityChecker:
             if wm_clean in excel_set:
                 results["match_count"] += 1
                 continue
-            
+
             # 模糊匹配
             found = False
             for ec in excel_cleans:
@@ -339,7 +396,7 @@ class SimilarityChecker:
             # 优先 O(1) 精确查找
             if em_clean in word_set:
                 continue
-                
+
             # 模糊匹配
             found = False
             for wc in word_cleans:

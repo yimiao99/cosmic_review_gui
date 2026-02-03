@@ -78,7 +78,7 @@ class ValidationWorker(QThread):
             template_path = get_resource_path("folder/附件1XX项目需求说明书V1.0.0.docx")
 
             RuntimeLogger.log(
-                f"🚀 [Step 0] 环境准备 - 启动并行架构，并发解析多个文档源..."
+                f"🚀 [Step 0] 环境准备 - 启动并行架构，Word文档处理前置到此阶段完成..."
             )
             self.progress.emit(2, "正在并发加载 Word/Excel 文件...")
 
@@ -104,23 +104,150 @@ class ValidationWorker(QThread):
 
                 self.progress.emit(8, "正在提取文档深层结构 (目录/层级)...")
 
+                # === 新增：数据预处理阶段 ===
+                # 为功能过程匹配预处理数据，避免在Step 6时重复读取
+                run_simple = raw_info.get("run_simple", False)
+                word_preprocessing_success = False  # [FIX] 标记预处理是否成功
+
+                # [核心优化] 将Word文档打开和大纲提取完全移到Step 0中完成
+                if run_simple and pair["word"] and pair["excel"]:
+                    RuntimeLogger.log(
+                        f"🔄 [Step 0.5] 开始预处理Word和Excel数据以优化后续匹配..."
+                    )
+                    self.progress.emit(10, "Word文档打开与大纲提取...")
+
+                    try:
+                        # [关键改进] 使用word_outline_extractor直接提取完整大纲（1170项）
+                        # 而不是prepare_word_data_async（只获取4项）
+                        def word_prep_progress(p, msg):
+                            mapped_p = 10 + int(p * 0.12)  # 10%-22%
+                            self.progress.emit(mapped_p, f"Word预处理: {msg}")
+
+                        RuntimeLogger.log(
+                            f"  [INFO] 🚀 [Step 0] 开始完整Word大纲及内容预处理..."
+                        )
+
+                        if pair["word"] and os.path.exists(pair["word"]):
+                            try:
+                                # [FIX] 使用 HierarchicalMatcher.prepare_word_data_async
+                                # 它会使用 win32 稳定提取大纲并在后台读取全文正文
+                                matcher = HierarchicalMatcher()
+
+                                word_prep_progress(
+                                    10, "正在启动 Word 结构及全文预提取..."
+                                )
+
+                                # 执行完整预处理（包含大纲、全文、Excel内容）
+                                word_cache = matcher.prepare_word_data_async(
+                                    pair["word"]
+                                )
+
+                                if word_cache and word_cache.get("items"):
+                                    word_items = word_cache["items"]
+                                    full_text_content = word_cache.get(
+                                        "full_text_content", []
+                                    )
+
+                                    word_prep_progress(
+                                        60,
+                                        f"已提取 {len(word_items)} 个章节，正在集成数据...",
+                                    )
+
+                                    # [NEW] 提前在Step 0.5提取Excel内容，确保一致性
+                                    word_prep_progress(
+                                        70, "正在预加载 Excel 功能点数据..."
+                                    )
+                                    try:
+                                        excel_config = raw_info
+                                        excel_sheet = excel_config.get(
+                                            "simple_sheet", 2
+                                        )
+                                        excel_header = excel_config.get(
+                                            "functional_header_row", 0
+                                        )
+                                        excel_col = excel_config.get(
+                                            "functional_column_index", 6
+                                        )
+
+                                        excel_data = matcher.extract_excel_content(
+                                            pair["excel"],
+                                            mode="flat",
+                                            sheet_name=excel_sheet,
+                                            header=excel_header,
+                                            column=excel_col,
+                                            level1_col=1,
+                                            level2_col=2,
+                                            level3_col=3,
+                                        )
+                                        word_cache["excel_data"] = excel_data
+                                        RuntimeLogger.log(
+                                            f"  [INFO] Excel内容预加载完成: {len(excel_data) if excel_data else 0} 项"
+                                        )
+                                    except Exception as e:
+                                        RuntimeLogger.log(
+                                            f"  [WARN] Excel预加载失败: {str(e)[:80]}",
+                                            level="WARN",
+                                        )
+                                        word_cache["excel_data"] = None
+
+                                    if not hasattr(self, "data_cache"):
+                                        self.data_cache = {}
+                                    self.data_cache["word_data"] = word_cache
+
+                                    word_prep_progress(
+                                        100,
+                                        f"完成: {len(word_items)} 项已缓存，包含全文内容",
+                                    )
+                                    RuntimeLogger.log(
+                                        f"✅ [Step 0] Word完整数据就绪: {len(word_items)} 章节, 全文 {len(full_text_content)} 项"
+                                    )
+                                    word_preprocessing_success = True
+                                else:
+                                    RuntimeLogger.log(
+                                        f"⚠️ Word预处理返回空结果", level="WARN"
+                                    )
+
+                            except Exception as e:
+                                RuntimeLogger.log(
+                                    f"⚠️ Word数据预处理异常: {str(e)[:150]}",
+                                    level="ERROR",
+                                )
+                        else:
+                            RuntimeLogger.log(f"⚠️ Word文件不存在", level="WARN")
+
+                    except Exception as e:
+                        RuntimeLogger.log(f"⚠️ Word数据预处理异常: {e}")
+                        RuntimeLogger.log(f"  [INFO] 将使用标准Word处理流程")
+
+                self.progress.emit(22, "正在继续提取文档结构...")
+
                 # 开始并发提取详细结构 (利用已加载的对象)
                 # 【优先使用稳定提取】使用 HierarchicalMatcher 替代 DocumentProcessor
-                
+
                 # [优化] 只有在需要 Word 相关内容时才执行昂贵的结构提取
                 run_template = raw_info.get("run_template", True)
                 run_factors = raw_info.get("run_factors", True)
                 run_hierarchy = raw_info.get("run_hierarchy", True)
-                run_simple = raw_info.get("run_simple", False)
 
-                need_target_structure = any([run_template, run_factors, run_hierarchy, run_simple])
+                need_target_structure = any(
+                    [run_template, run_factors, run_hierarchy, run_simple]
+                )
                 # 只有 Step 1 模板校验真正需要解析模板文档结构
                 need_tpl_structure = run_template
 
                 template_sections = []
                 target_sections = []
 
-                if need_target_structure:
+                # [DEBUG] 调试标志状态
+                RuntimeLogger.log(
+                    f"[DEBUG] word_preprocessing_success={word_preprocessing_success}, need_target_structure={need_target_structure}"
+                )
+                RuntimeLogger.log(
+                    f"[DEBUG] run_template={run_template}, run_factors={run_factors}, run_hierarchy={run_hierarchy}, run_simple={run_simple}"
+                )
+
+                # [FIX] 如果Word预处理已成功，则跳过重复的Word结构提取
+                if need_target_structure and not word_preprocessing_success:
                     RuntimeLogger.log(
                         f"🔎 [Step 0] 正在预提取 Word 目录树... (优先使用稳定大纲提取)"
                     )
@@ -129,61 +256,153 @@ class ValidationWorker(QThread):
 
                     # 修改为接受路径 and 对象，优先使用 COM 接口（获取准确编号 and 过滤正文）
                     def extract_word_hierarchy(path, doc_obj):
-                        """包装函数：优先使用稳定 COM 提取大纲编号，并保留正文内容用于查重"""
+                        """包装函数：提取 Word 内容结构，包含章节及正文"""
 
                         def extraction_progress_proxy(p, msg):
                             """转换提取进度为 UI 友好的进度点"""
-                            # 文档结构提取占约 10% 的进度权重，从 8% 映射到 18%
                             mapped_p = 8 + int(p * 0.1)
                             self.progress.emit(mapped_p, msg)
 
                         try:
-                            # 1. 【核心优化】优先尝试使用基于 Word COM 接口的稳定提取 (支持获取完整编号、正确过滤正文、提取各章节内容)
+                            # ===== 核心方案：使用 HierarchicalMatcher 提供的稳健提取 =====
                             if path and os.path.exists(path):
                                 RuntimeLogger.log(
-                                    f"  [INFO] 正在对 {os.path.basename(path)} 执行稳定全结构提取 (COM)..."
+                                    f"  [INFO] 🌟 使用 HierarchicalMatcher 提取内容结构: {os.path.basename(path)}"
                                 )
-                                # 调用 DocumentProcessor 的稳定模式，它会提取正文用于查重，同时保留准确的编号
-                                result = DocumentProcessor.extract_word_structure(
-                                    path,
-                                    use_stable=True,
-                                    progress_callback=extraction_progress_proxy,
+                                extraction_progress_proxy(
+                                    0, "正在通过 Win32 接口提取 Word 结构及内容..."
                                 )
-                                if result and len(result) > 0:
-                                    return result
 
-                            # 2. 备选方案 A：尝试从 python-docx 对象中提取 (如果是 BytesIO 加载的文档)
+                                matcher = HierarchicalMatcher()
+                                result = matcher.extract_word_outline_as_hierarchy(
+                                    path, include_content=True
+                                )
+
+                                if result:
+                                    # [FIX] extract_word_outline_as_hierarchy 返回的是字典，需要提取 all_items 列表
+                                    items = (
+                                        result
+                                        if isinstance(result, list)
+                                        else result.get("all_items", [])
+                                    )
+                                    extraction_progress_proxy(100, "Word 结构提取完成")
+                                    RuntimeLogger.log(
+                                        f"  [OK] ✅ 内容结构提取成功: {len(items)} 项 (含正文内容)"
+                                    )
+                                    return items
+
+                            # ===== 降级方案 A：DocumentProcessor 稳定模式 =====
+                            RuntimeLogger.log(
+                                f"  [WARN] ⚠️ 降级使用 DocumentProcessor.extract_word_structure(use_stable=True)..."
+                            )
+                            result = DocumentProcessor.extract_word_structure(
+                                path,
+                                use_stable=True,
+                                progress_callback=extraction_progress_proxy,
+                            )
+                            if result and len(result) > 0:
+                                RuntimeLogger.log(
+                                    f"  [OK] DocumentProcessor 提取成功: {len(result)} 项"
+                                )
+                                return result
+
+                            # ===== 降级方案 B：HierarchicalMatcher 从 docx 对象提取 =====
+                            RuntimeLogger.log(
+                                f"  [WARN] ⚠️ 降级使用 HierarchicalMatcher.extract_outline_from_docx_object..."
+                            )
                             result = matcher.extract_outline_from_docx_object(doc_obj)
                             if result.get("all_items") and len(result["all_items"]) > 0:
+                                RuntimeLogger.log(
+                                    f"  [OK] HierarchicalMatcher 提取成功: {len(result['all_items'])} 项"
+                                )
                                 return result["all_items"]
 
-                            # 3. 备选方案 B：降级
-                            raise Exception("无法通过 COM 接口提取文档结构")
+                            raise Exception("无法通过任何方式提取文档结构")
+
                         except Exception as e:
+                            import traceback
+
                             RuntimeLogger.log(
-                                f"[WARN] 稳定提取模式受限，降级使用 python-docx: {e}"
+                                f"[ERROR] extract_word_hierarchy 异常: {e}",
+                                level="ERROR",
                             )
-                            return DocumentProcessor.extract_word_structure(doc_obj)
+                            RuntimeLogger.log(traceback.format_exc(), level="DEBUG")
+
+                            # ===== 最终兜底方案 =====
+                            RuntimeLogger.log(
+                                f"[WARN] 🛟 最终降级: DocumentProcessor.extract_word_structure(无 use_stable)..."
+                            )
+                            try:
+                                fallback = DocumentProcessor.extract_word_structure(
+                                    doc_obj
+                                )
+                                RuntimeLogger.log(
+                                    f"  [OK] 🛟 最终降级成功: {len(fallback) if fallback else 0} 项"
+                                )
+                                return fallback or []
+                            except Exception as e2:
+                                RuntimeLogger.log(
+                                    f"[ERROR] 所有提取方案均失败: {e2}", level="ERROR"
+                                )
+                                return []
 
                     # 并发执行
                     futures = {}
                     if need_tpl_structure:
-                        futures["tpl"] = executor.submit(extract_word_hierarchy, template_path, tpl_doc)
-                    
-                    futures["target"] = executor.submit(extract_word_hierarchy, pair["word"], target_doc)
-                    
+                        futures["tpl"] = executor.submit(
+                            extract_word_hierarchy, template_path, tpl_doc
+                        )
+
+                    futures["target"] = executor.submit(
+                        extract_word_hierarchy, pair["word"], target_doc
+                    )
+
                     excel_info = future_excel_info.result()  # 已有缓存
 
                     if "tpl" in futures:
                         template_sections = futures["tpl"].result()
-                    
+
                     target_sections = futures["target"].result()
-                    
+
                     RuntimeLogger.log(
                         f"✅ [Step 0] 预提取完成，共获取 {len(target_sections)} 个章节/内容项"
                     )
+                elif word_preprocessing_success:
+                    # [FIX] 如果Word预处理成功，直接使用预处理的数据，跳过重复提取
+                    RuntimeLogger.log("🔎 [Step 0] 使用预处理的Word数据，跳过重复提取")
+                    excel_info = future_excel_info.result()
+                    target_sections = (
+                        getattr(self, "data_cache", {})
+                        .get("word_data", {})
+                        .get("items", [])
+                    )
+
+                    # [FIX] 即使已预处理目标文档，如果需要模板校验，也必须确保 template_sections 被加载
+                    if need_tpl_structure and not template_sections:
+                        RuntimeLogger.log(
+                            "🔎 [Step 0] 预处理模式：同步加载模板文档结构 (含正文)..."
+                        )
+                        try:
+                            matcher = HierarchicalMatcher()
+                            tpl_res = matcher.extract_word_outline_as_hierarchy(
+                                template_path, include_content=True
+                            )
+                            template_sections = tpl_res.get("all_items", [])
+                            RuntimeLogger.log(
+                                f"✅ [Step 0] 模板结构加载完成: {len(template_sections)} 项"
+                            )
+                        except Exception as e:
+                            RuntimeLogger.log(
+                                f"⚠️ [Step 0] 模板结构加载失败: {e}", level="WARN"
+                            )
+
+                    RuntimeLogger.log(
+                        f"✅ [Step 0] 使用缓存数据: {len(target_sections)} 个章节/内容项"
+                    )
                 else:
-                    RuntimeLogger.log("🔎 [Step 0] 跳过 Word 结构提取 (未选择任何 Word 校验节点)")
+                    RuntimeLogger.log(
+                        "🔎 [Step 0] 跳过 Word 结构提取 (未选择任何 Word 校验节点)"
+                    )
                     excel_info = future_excel_info.result()
 
             if not tpl_doc and need_tpl_structure:
@@ -204,6 +423,11 @@ class ValidationWorker(QThread):
 
             if not self._is_running:
                 return
+
+            # [NEW] 提交 Step 0 结果
+            self.step_result.emit(
+                0, {"env_check": {"is_ok": True, "sections": len(target_sections)}}
+            )
 
             v_res = {}  # 保证 v_res 始终存在
             self.progress.emit(15, "正在扫描 Excel 工作表列表...")
@@ -255,7 +479,9 @@ class ValidationWorker(QThread):
             self.progress.emit(33, "正在准备送审比例计算...")
 
             # 6. 功能匹配校验 (辅助数据)
-            if target_sections and (raw_info.get("run_hierarchy") or raw_info.get("run_simple")):
+            if target_sections and (
+                raw_info.get("run_hierarchy") or raw_info.get("run_simple")
+            ):
                 RuntimeLogger.log(
                     f"正在进行 [辅助步骤] Word 与 Excel 模块名称匹配度计算..."
                 )
@@ -328,7 +554,7 @@ class ValidationWorker(QThread):
             fuzzy = raw_info.get("fuzzy", True)
             threshold = raw_info.get("threshold", 0.8)
 
-            hierarchy_mapping = None # [NEW]
+            hierarchy_mapping = None  # [NEW]
 
             if run_hierarchy:
                 RuntimeLogger.log(f"正在启动 [Step 5] 核心层级匹配校验...")
@@ -340,8 +566,13 @@ class ValidationWorker(QThread):
                     mapped_progress = 39 + int(p * 0.31)
                     self.progress.emit(mapped_progress, f"层级匹配: {msg}")
                     if msg and (
-                        "开始" in msg or "完成" in msg or "1/" in msg or "/100" in msg
-                        or "[PROCESS]" in msg or "阶段" in msg or "匹配" in msg
+                        "开始" in msg
+                        or "完成" in msg
+                        or "1/" in msg
+                        or "/100" in msg
+                        or "[PROCESS]" in msg
+                        or "阶段" in msg
+                        or "匹配" in msg
                     ):
                         RuntimeLogger.log(f"[Step 5] {msg}")
 
@@ -352,7 +583,9 @@ class ValidationWorker(QThread):
                 hier_sheet = raw_info.get("hierarchy_sheet")
 
                 hierarchy_res = DocumentProcessor.validate_hierarchy_matching(
-                    target_doc,
+                    pair[
+                        "word"
+                    ],  # [FIX] 传递路径而不是 Document 对象，避免 os.path.basename 失败
                     pair["excel"],
                     header_row=h_header_row,
                     level1_col=l1_col,
@@ -366,26 +599,33 @@ class ValidationWorker(QThread):
                     project_name=self.task_data["filename"],
                 )
                 v_res["hierarchy_res"] = hierarchy_res
-                
+
                 # [Optimization] 提取层级映射结果用于辅助功能过程匹配
                 try:
                     hierarchy_mapping = {}
                     # 合并精确匹配和模糊匹配的结果
-                    matched_items = (hierarchy_res.get("exact_matched", []) + 
-                                   hierarchy_res.get("fuzzy_matched", []))
+                    matched_items = hierarchy_res.get(
+                        "exact_matched", []
+                    ) + hierarchy_res.get("fuzzy_matched", [])
                     for item in matched_items:
                         # 构造 Excel 层级 key
                         e_l1 = str(item.get("Excel一级模块", "")).strip()
                         e_l2 = str(item.get("Excel二级模块", "")).strip()
                         e_l3 = str(item.get("Excel三级模块", "")).strip()
                         key = (e_l1, e_l2, e_l3)
-                        
+
                         # 寻找 Word 匹配项 (优先使用三级标题，其次二级，其次一级)
-                        w_title = item.get("Word三级标题") or item.get("Word二级标题") or item.get("Word一级标题")
+                        w_title = (
+                            item.get("Word三级标题")
+                            or item.get("Word二级标题")
+                            or item.get("Word一级标题")
+                        )
                         if w_title:
                             hierarchy_mapping[key] = w_title
-                    
-                    RuntimeLogger.log(f"已成功提取 {len(hierarchy_mapping)} 个层级映射锚点用于加速后续匹配")
+
+                    RuntimeLogger.log(
+                        f"已成功提取 {len(hierarchy_mapping)} 个层级映射锚点用于加速后续匹配"
+                    )
                 except Exception as e:
                     RuntimeLogger.log(f"提取层级映射失败: {e}", level="WARN")
 
@@ -421,8 +661,14 @@ class ValidationWorker(QThread):
                     self.progress.emit(mapped_progress, f"过程匹配: {msg}")
                     # 扩展日志白名单，确保功能点匹配的各个阶段进度也能记录到日志文件
                     if msg and (
-                        "开始" in msg or "完成" in msg or "1/" in msg or "/100" in msg 
-                        or "[PROCESS]" in msg or "阶段" in msg or "搜索" in msg or "进度" in msg
+                        "开始" in msg
+                        or "完成" in msg
+                        or "1/" in msg
+                        or "/100" in msg
+                        or "[PROCESS]" in msg
+                        or "阶段" in msg
+                        or "搜索" in msg
+                        or "进度" in msg
                     ):
                         RuntimeLogger.log(f"[Step 6] {msg}")
 
@@ -437,7 +683,10 @@ class ValidationWorker(QThread):
                     progress_callback=process_progress_proxy,
                     word_sections_preloaded=target_sections,  # [CORE] 数据透传
                     project_name=self.task_data["filename"],
-                    hierarchy_mapping=hierarchy_mapping, # [NEW] 传入已有的映射结果
+                    hierarchy_mapping=hierarchy_mapping,  # [NEW] 传入已有的映射结果
+                    preloaded_word_data=getattr(self, "data_cache", {}).get(
+                        "word_data"
+                    ),  # [NEW] 预处理数据
                 )
                 v_res["process_res"] = process_res
             else:
@@ -516,7 +765,7 @@ class TaskCard(QFrame):
         self.est_total = 45.0  # 预计初始耗时 45 秒 (更符合实际情况)
         self.current_display_progress = 0
         self.target_backend_progress = 0
-        self.current_step_num = 1
+        self.current_step_num = 0  # 从节点 0 开始
         self.is_running = True
         self.current_view_step = 0  # 初始化当前查看的步骤 (用于主题切换时重新应用样式)
 
@@ -1003,9 +1252,10 @@ class TaskCard(QFrame):
         self.steps_widget.set_total_progress(self.current_display_progress)
 
         # [NEW] 线性步进：当前的百分比在步骤区间内的位置
-        # 同步 ValidationWorker 中的 emit 节点：30, 33, 36, 39, 70, 95, 100
+        # 同步 ValidationWorker 中的 emit 节点：0, 15, 30, 33, 36, 39, 70, 95, 100
         ranges = [
-            (0, 30),  # Step 1: 模板
+            (0, 15),  # Step 0: 环境准备
+            (15, 30),  # Step 1: 模板
             (30, 33),  # Step 2: 空值
             (33, 36),  # Step 3: 比例
             (36, 39),  # Step 4: 因子
@@ -1013,7 +1263,7 @@ class TaskCard(QFrame):
             (70, 95),  # Step 6: 过程
             (95, 100),  # Step 7: 移动
         ]
-        idx = max(0, min(len(ranges) - 1, self.current_step_num - 1))
+        idx = max(0, min(len(ranges) - 1, self.current_step_num))
         curr_range = ranges[idx]
 
         span = curr_range[1] - curr_range[0]
@@ -1049,10 +1299,10 @@ class TaskCard(QFrame):
             "数据移动校验与报告汇总",
         ]
 
-        # 匹配 ValidationWorker.run 中的 emit 点：[0, 30, 33, 36, 39, 70, 95]
+        # 匹配 ValidationWorker.run 中的 emit 点：[0, 15, 30, 33, 36, 39, 70, 95]
         if value < 15:
             current_idx = 0
-            self.current_step_num = 1
+            self.current_step_num = 0
         elif value < 30:
             current_idx = 1
             self.current_step_num = 1
@@ -1077,19 +1327,33 @@ class TaskCard(QFrame):
 
         # 3. 更新界面状态文字
         if hasattr(self, "status_label"):
+            # [UI FIX] 根据用户反馈，Step 数字与 Node ID 保持一致 (环境准备=0, 功能过程=6)
             disp_step = self.current_step_num
             step_text = step_names[current_idx]
+
+            # [USER UPDATE] 按照用户要求格式化：正在进行第x步 - 正在xxx
             # 强化描述：如果有子步骤文字则展示，否则展示大标题
             display_text = sub_step_text if sub_step_text else step_text
-            
-            # [Optimization] 如果包含 [PROCESS] 标签，直接显示进度原文，增强实时感
+
             if "[PROCESS]" in display_text:
-                # 提取 [PROCESS] 及其之后的内容，过滤掉前面的步骤前缀
-                start_p = display_text.find("[PROCESS]")
-                self.status_label.setText(display_text[start_p:])
+                # [Optimization] 针对功能过程匹配的特殊进度格式化
+                # 去掉多余的阶段前缀，保留核心进度
+                clean_detail = (
+                    display_text.replace("[PROCESS]", "")
+                    .replace("过程匹配:", "")
+                    .strip()
+                )
+                if self.current_step_num == 6:
+                    self.status_label.setText(
+                        f"正在进行第 {disp_step} 步:功能过程匹配 {clean_detail}"
+                    )
+                else:
+                    self.status_label.setText(
+                        f"正在进行第 {disp_step} 步 - {step_text} {clean_detail}"
+                    )
             else:
                 self.status_label.setText(
-                    f"正在进行: 第 {disp_step} 步 - {display_text}..."
+                    f"正在进行第 {disp_step} 步 - {display_text}..."
                 )
             self.status_icon.setText("🔄")
 
@@ -1099,8 +1363,7 @@ class TaskCard(QFrame):
             else:
                 pass
 
-        # [NEW] 同步更新日志面板与内存日志池，确保即使点击气泡也能看到最新动态
-        # 仅在进度未完成且该步骤尚未有最终结论时，更新中间状态日志，避免覆盖已生成的详情报告
+        # [NEW] 同步更新日志面板与内存日志池
         if value < 100:
             current_log = self.task_data["logs"].get(self.current_step_num, "")
             # 如果已有 ✅ 或 ❌ 标志，说明该步骤已经完成并输出了正式结论，不再更新中间进度描述
@@ -1121,8 +1384,8 @@ class TaskCard(QFrame):
 
         # 4. 如果步骤跨越了，处理视觉流转
         if self.current_step_num > old_step:
-            for s in range(1, self.current_step_num):
-                curr_status = self.steps_widget.step_nodes[s - 1].status
+            for s in range(0, self.current_step_num):
+                curr_status = self.steps_widget.step_nodes[s].status
                 if curr_status not in ["done", "fail", "warn", "finished"]:
                     self.steps_widget.set_step_status(s, "finished")
             self.steps_widget.set_step_progress(self.current_step_num, 5)
@@ -1140,7 +1403,15 @@ class TaskCard(QFrame):
 
     def _update_specific_step_ui(self, step_num, results):
         """更新特定步骤的 UI 状态和日志"""
-        if step_num == 1:
+        if step_num == 0:
+            env_res = results.get("env_check", {})
+            status = "done"
+            log = f"✅ 环境准备完成，成功解析文档对象并预提取了 {env_res.get('sections', 0)} 个章节内容。"
+            self.steps_widget.set_step_status(0, status)
+            self.task_data["logs"][0] = log
+            self.update_log(0, log)
+
+        elif step_num == 1:
             if results.get("skipped"):
                 status = "skipped"
                 log = "⚪ 模板校验已跳过。"
@@ -1378,48 +1649,86 @@ class TaskCard(QFrame):
 
                         issue_details = []
 
-                        # 1. 汇总缺失项
-                        miss_list = []
-                        seen_miss_prefixes = set()
+                        def _group_by_prefix(desc_list):
+                            groups = {}
+                            order = 0
+                            for raw in desc_list:
+                                if not raw or raw == "-":
+                                    continue
+                                desc = " ".join(str(raw).split())
+                                parts = desc.split("：", 1)
+                                prefix = parts[0].strip()
+                                body = parts[1].strip() if len(parts) > 1 else ""
+
+                                if prefix not in groups:
+                                    groups[prefix] = {"order": order, "bodies": []}
+                                    order += 1
+                                if body and body not in groups[prefix]["bodies"]:
+                                    groups[prefix]["bodies"].append(body)
+                                elif not body and body not in groups[prefix]["bodies"]:
+                                    groups[prefix]["bodies"].append(body)
+                            return groups
+
+                        # 1) 缺失：按类型前缀分组（最多展示 3 种）
+                        miss_descs = []
                         for item in all_failed_items:
-                            desc = item.get("缺失简略描述")
-                            if not desc or desc == "-":
-                                if item.get("匹配状态") == "缺失":
-                                    desc = item.get("简略描述")
+                            d = item.get("缺失简略描述")
+                            if not d or d == "-":
+                                d_gen = item.get("简略描述")
+                                if d_gen and "未体现" in str(d_gen):
+                                    d = d_gen
+                            if d and d != "-":
+                                miss_descs.append(d)
 
-                            if desc and desc != "-":
-                                prefix = desc.split("：")[0] if "：" in desc else desc
-                                if prefix not in seen_miss_prefixes:
-                                    miss_list.append(desc)
-                                    seen_miss_prefixes.add(prefix)
-
-                        if miss_list:
+                        miss_groups = _group_by_prefix(miss_descs)
+                        if miss_groups:
+                            lines = []
+                            for prefix, info in sorted(
+                                miss_groups.items(), key=lambda kv: kv[1]["order"]
+                            ):
+                                bodies = info["bodies"]
+                                body0 = bodies[0] if bodies else ""
+                                count = len([b for b in bodies if b]) or 1
+                                if body0:
+                                    lines.append(
+                                        f"{prefix}：{body0}（已合并{count}条）"
+                                    )
+                                else:
+                                    lines.append(f"{prefix}（已合并{count}条）")
                             issue_details.append(
                                 f"• [缺失项] (Excel在Word未体现): \n  - "
-                                + "\n  - ".join(miss_list[:10])
+                                + "\n  - ".join(lines[:3])
                             )
 
-                        # 2. 汇总层级不匹配项
-                        match_list = []
-                        seen_match_prefixes = set()
+                        # 2) 层级不匹配：按类型前缀分组（最多展示 7 种）
+                        mismatch_descs = []
                         for item in all_failed_items:
-                            desc = item.get("层级不匹配简略描述")
-                            if not desc or desc == "-":
-                                if item.get("匹配状态") == "层级不匹配":
-                                    d_gen = item.get("简略描述", "")
-                                    if "不匹配" in d_gen:
-                                        desc = d_gen
+                            d = item.get("层级不匹配简略描述")
+                            if not d or d == "-":
+                                d_gen = item.get("简略描述", "")
+                                if d_gen and "不匹配" in str(d_gen):
+                                    d = d_gen
+                            if d and d != "-":
+                                mismatch_descs.append(d)
 
-                            if desc and desc != "-":
-                                prefix = desc.split("：")[0] if "：" in desc else desc
-                                if prefix not in seen_match_prefixes:
-                                    match_list.append(desc)
-                                    seen_match_prefixes.add(prefix)
-
-                        if match_list:
+                        mismatch_groups = _group_by_prefix(mismatch_descs)
+                        if mismatch_groups:
+                            lines = []
+                            for prefix, info in sorted(
+                                mismatch_groups.items(), key=lambda kv: kv[1]["order"]
+                            ):
+                                bodies = info["bodies"]
+                                body0 = bodies[0] if bodies else ""
+                                count = len([b for b in bodies if b]) or 1
+                                if body0:
+                                    lines.append(
+                                        f"{prefix}：{body0}（已合并{count}条）"
+                                    )
+                                else:
+                                    lines.append(f"{prefix}（已合并{count}条）")
                             issue_details.append(
                                 f"• [层级不匹配] (对应关系错误): \n  - "
-                                + "\n  - ".join(match_list[:10])
+                                + "\n  - ".join(lines[:7])
                             )
 
                         total_issues = len(not_found_items) + len(mismatched_items)
@@ -2028,6 +2337,7 @@ class TaskCard(QFrame):
         )
 
         # 2. 更新徽章
+        # [UI FIX] 徽标与节点 0 对应，显示 STEP 00
         self.step_badge.setText(f"STEP {step_num:02d}")
         self.step_badge.setStyleSheet(
             f"""
@@ -2037,9 +2347,10 @@ class TaskCard(QFrame):
         )
 
         # 3. 更新标题
+        # [UI FIX] 修复 0 索引偏移，使得 STEP 00 对应 "环境准备"
         step_name = "详情"
-        if 1 <= step_num <= len(self.task_data["steps"]):
-            step_name = self.task_data["steps"][step_num - 1][0]
+        if 0 <= step_num < len(self.task_data["steps"]):
+            step_name = self.task_data["steps"][step_num][0]
 
         self.detail_title.setText(f"{step_name}校验报告")
         self.detail_title.setStyleSheet(

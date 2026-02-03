@@ -452,7 +452,7 @@ class UploadDialog(QDialog):
         label.setStyleSheet("font-size: 13px; font-weight: 600;")
 
         self.days_input = QLineEdit()
-        self.days_input.setPlaceholderText("请输入数值，例如: 125.5")
+        self.days_input.setPlaceholderText("仅开启[送审比例]时必填，例如: 125.5")
         self.days_input.setFixedHeight(38)
 
         row.addWidget(label)
@@ -1148,19 +1148,33 @@ class UploadDialog(QDialog):
                 self.excel_sheet_combo.addItem(display_text, sheet_name)
                 self.simple_excel_combo.addItem(display_text, sheet_name)
 
-            # 智能默认选择：优先寻找包含“功能点”或“拆分”的工作表
+            # 智能默认选择：优先寻找“功能过程点拆分表”
             default_sheet_idx = 0  # 兜底选第一个
+
+            # 第一优先级：包含“功能过程点拆分表”或“功能点拆分表”
+            found_target = False
             for i, name in enumerate(sheet_names):
-                if any(
-                    keyword in name for keyword in ["功能点", "拆分", "清单", "审核"]
-                ):
+                if any(kw in name for kw in ["功能过程点拆分表", "功能点拆分表"]):
                     default_sheet_idx = i
-                    print(f"找到默认工作表: {name} (索引 {i})")
+                    print(f"找到目标工作表: {name} (索引 {i})")
+                    found_target = True
                     break
 
-            # 如果没找到关键词且工作表够多，可以维持原本尝试选第3个的逻辑(针对特定模板)
-            if default_sheet_idx == 0 and len(sheet_names) >= 3:
-                # 检查一下逻辑，如果确实想优先选第3个（可能有些模板前两个是封面和说明）
+            # 第二优先级：包含其他常用关键词
+            if not found_target:
+                for i, name in enumerate(sheet_names):
+                    if any(
+                        keyword in name
+                        for keyword in ["功能点", "拆分", "清单", "审核"]
+                    ):
+                        default_sheet_idx = i
+                        print(f"找到默认工作表: {name} (索引 {i})")
+                        found_target = True
+                        break
+
+            # 如果都没找到关键词且工作表够多，可以维持原本尝试选第3个的逻辑(针对特定模板)
+            if not found_target and default_sheet_idx == 0 and len(sheet_names) >= 3:
+                # 只有在完全没匹配到关键词的情况下，才尝试选第3个
                 default_sheet_idx = 2
 
             # Hierarchy sheet
@@ -1630,9 +1644,12 @@ class UploadDialog(QDialog):
 
     def start_review(self):
         """开始审核"""
-        if not self.days_input.text():
+        # 只有在选择了“送审比例”节点时，才必须输入线上送审人天
+        if self.check_ratio.isChecked() and not self.days_input.text().strip():
             QMessageBox.warning(
-                self, "警告", "必须输入【线上送审人天】才能进行第2步计算！"
+                self,
+                "警告",
+                "已选择【3. 送审比例】节点，必须输入【线上送审人天】才能进行计算！",
             )
             # 适配深色模式错误样式
             self.days_input.setStyleSheet(
@@ -1648,6 +1665,9 @@ class UploadDialog(QDialog):
             """
             )
             return
+
+        # 重置样式（如果之前报错过）
+        self.days_input.setStyleSheet("")
 
         valid_files = [
             k for k, v in self.file_queue.items() if v["has_word"] and v["has_excel"]

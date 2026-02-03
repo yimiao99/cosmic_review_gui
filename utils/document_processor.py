@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import pandas as pd
 from docx import Document
 import tempfile
@@ -169,6 +170,13 @@ class DocumentProcessor:
         import win32com.client as win32
         import pythoncom
 
+        # 初始化计时
+        start_time = time.time()
+        logger = RuntimeLogger()
+        logger.log(
+            f"开始Win32方式提取文档结构: {os.path.basename(file_path)}", level="INFO"
+        )
+
         pythoncom.CoInitialize()
         word = None
         doc = None
@@ -221,7 +229,10 @@ class DocumentProcessor:
 
             print(f"[PROCESS] 文档预估段落数: {total_paras}，开始提取...")
 
+            # 初始化进度计数器
             p_idx = 0
+            content_lines_added = 0
+
             for para in doc.Paragraphs:
                 try:
                     p_idx += 1
@@ -357,6 +368,15 @@ class DocumentProcessor:
                         )
                         if content_text:
                             current_section["content"].append(content_text)
+                            content_lines_added += 1
+
+                            # 每500行内容输出一次进度
+                            if content_lines_added % 500 == 0:
+                                elapsed = time.time() - start_time
+                                logger.log(
+                                    f"内容提取进度 - 已处理段落: {p_idx}, 添加内容行: {content_lines_added}, 耗时: {elapsed:.1f}秒",
+                                    level="INFO",
+                                )
                 except:
                     continue
 
@@ -380,6 +400,13 @@ class DocumentProcessor:
                     if i in current_titles and current_titles[i]
                 ]
                 s["full_path"] = " > ".join(path_parts)
+
+            # 输出详细的处理统计
+            total_elapsed = time.time() - start_time
+            logger.log(
+                f"第一轮提取完成 - 总段落: {p_idx}, 章节数: {len(sections)}, 内容行数: {content_lines_added}, 总耗时: {total_elapsed:.2f}秒",
+                level="INFO",
+            )
 
             print(f"[STABLE-EXTRACT] ✓ 成功提取 {len(sections)} 个章节")
             return sections
@@ -446,39 +473,96 @@ class DocumentProcessor:
         支持文件路径（str）或已加载的 Document 对象
         """
         import re  # 确保在函数作用域内可以访问re模块
+        import time
+
+        start_time = time.time()
+
+        try:
+            from utils.runtime_logger import RuntimeLogger
+
+            if RuntimeLogger:
+                RuntimeLogger.log(f"📜 开始提取Word文档结构...", level="INFO")
+        except:
+            pass
+
+        # 提取文件名用于日志
+        if hasattr(file_path, "paragraphs"):
+            doc_name = "内存文档对象"
+        else:
+            doc_name = os.path.basename(str(file_path))
+
+        print(f"[DOC-PROCESS-START] 开始处理文档: {doc_name}")
 
         # 如果启用稳定大纲提取模式 (基于 Word COM)
         if use_stable and isinstance(file_path, (str, Path)):
-            print(f"[PROCESS] 启用稳定大纲提取模式: {file_path}")
-            return DocumentProcessor.extract_word_outline_stable_win32(
-                file_path, progress_callback=progress_callback
-            )
+            print(f"[DOC-PROCESS] 启用稳定大纲提取模式: {file_path}")
+            stable_start = time.time()
+
+            try:
+                result = DocumentProcessor.extract_word_outline_stable_win32(
+                    file_path, progress_callback=progress_callback
+                )
+                stable_duration = time.time() - stable_start
+
+                if result and len(result) > 0:
+                    total_duration = time.time() - start_time
+                    print(
+                        f"[DOC-PROCESS-SUCCESS] 稳定大纲提取成功: {len(result)}项, 耗时: {stable_duration:.2f}秒, 总耗时: {total_duration:.2f}秒"
+                    )
+                    return result
+                else:
+                    print(f"[DOC-PROCESS-FALLBACK] 稳定大纲提取无结果，回退到传统方法")
+            except Exception as e:
+                stable_duration = time.time() - stable_start
+                print(
+                    f"[DOC-PROCESS-ERROR] 稳定大纲提取失败(耗时{stable_duration:.2f}秒): {e}"
+                )
+                print(f"[DOC-PROCESS-FALLBACK] 回退到传统方法")
+
+        print(f"[DOC-PROCESS] 开始直接大纲级别分析...")
 
         temp_docx = None
         doc = None
 
         # 检查是否已是 Document 对象（通过类名检查，避免 isinstance 作用域问题）
+        doc_open_start = time.time()
         if hasattr(file_path, "paragraphs") and hasattr(file_path, "element"):
             # 这是一个 Document 对象
             doc = file_path
-            print(f"[PROCESS] 已接收 Document 对象，段落数: {len(doc.paragraphs)}")
+            print(
+                f"[DOC-PROCESS] 使用传入的Document对象，段落数: {len(doc.paragraphs)}"
+            )
         else:
             # 统一转为字符串处理，防止 pathlib.Path 对象导致 lower() 失败
             file_path_str = str(file_path)
-            print(f"[PROCESS] 开始提取结构: {file_path_str}")
+            print(f"[DOC-PROCESS] 正在打开文件: {file_path_str}")
             if file_path_str.lower().endswith(".doc"):
-                print(f"[PROCESS] 检测到 .doc 格式，启动 COM 转换...")
+                print(f"[DOC-PROCESS] 检测到.doc格式，启动COM转换...")
+                convert_start = time.time()
                 temp_docx = DocumentProcessor._convert_doc_to_docx(file_path_str)
+                convert_duration = time.time() - convert_start
                 if not temp_docx:
-                    print(f"[PROCESS] ❌ .doc 转换失败")
+                    print(
+                        f"[DOC-PROCESS] ❌ .doc转换失败(耗时{convert_duration:.2f}秒)"
+                    )
                     return []
+                print(
+                    f"[DOC-PROCESS] .doc转换成功(耗时{convert_duration:.2f}秒)，临时文件: {temp_docx}"
+                )
                 doc_to_read = temp_docx
             else:
                 doc_to_read = file_path_str
 
-            print(f"[PROCESS] 正在加载 docx 对象: {doc_to_read}")
+            print(f"[DOC-PROCESS] 正在加载docx对象: {doc_to_read}")
+            load_start = time.time()
             doc = Document(doc_to_read)
-            print(f"[PROCESS] 加载完成，段落数: {len(doc.paragraphs)}")
+            load_duration = time.time() - load_start
+            print(
+                f"[DOC-PROCESS] docx加载完成(耗时{load_duration:.2f}秒)，段落数: {len(doc.paragraphs)}"
+            )
+
+        doc_open_duration = time.time() - doc_open_start
+        print(f"[DOC-PROCESS] 文档打开总耗时: {doc_open_duration:.2f}秒")
 
         try:
             sections = []
@@ -550,30 +634,10 @@ class DocumentProcessor:
                 "建议进行",
             ]
 
-            # 【修复】不再重新映射Heading层级，直接使用Heading的原始数字
-            # 这样可以保持与TOC编号层级的一致性
-            # 例如：Heading 3 → Level 3, Heading 4 → Level 4
-            # TOC中的 4.1.1（3个点=Level 3）会匹配 Heading 3
-            # TOC中的 4.1.1.1（4个点=Level 4）会匹配 Heading 4
-            heading_styles_map = {}  # {heading_style_num: actual_level}
-
-            # 收集文档中使用的Heading样式（仅用于日志）
-            used_heading_styles = set()
-            for paragraph in doc.paragraphs:
-                style_name = paragraph.style.name.lower()
-                if "heading" in style_name or "标题" in style_name:
-                    for i in range(1, 10):
-                        if str(i) in style_name:
-                            used_heading_styles.add(i)
-                            break
-
-            # 建立映射：直接使用Heading原始数字作为层级（不重新映射）
-            if used_heading_styles:
-                for heading_num in used_heading_styles:
-                    heading_styles_map[heading_num] = (
-                        heading_num  # 不再压缩，保持原始数字
-                    )
-                print(f"[HEADING-MAP] 检测到的Heading样式映射: {heading_styles_map}")
+            # 【优化】不再重新映射Heading层级，直接使用Heading的原始数字
+            # 初始化所有可能的 Heading 1-9 映射，避免在大文档中全量扫描样式
+            heading_styles_map = {i: i for i in range(1, 10)}
+            print(f"[HEADING-MAP] 应用默认Heading样式映射: {heading_styles_map}")
 
             def get_level_enhanced(text, style_name, p_obj):
                 if any(kw in text for kw in instruction_blacklist):
@@ -829,14 +893,17 @@ class DocumentProcessor:
             # TOC编号映射表：标题文本 -> (编号, 层级)
             toc_number_map = {}
 
-            # 检查文档是否使用了 outline level（智能目录）
-            # 如果使用了，优先使用 outline level，但不强制要求所有段落都有
+            # 【优化】延迟检测 outline level，在后续遍历中自动处理
             uses_outline_level = False
-            for para in doc.paragraphs:
+
+            # 收集所有段落（使用缓存以提升性能）
+            all_paragraphs = []
+            # 预采样检测 outline level
+            for p in doc.paragraphs[:300]:
                 try:
                     if (
-                        para._element.pPr is not None
-                        and para._element.pPr.outlineLvl is not None
+                        p._element.pPr is not None
+                        and p._element.pPr.outlineLvl is not None
                     ):
                         uses_outline_level = True
                         break
@@ -844,16 +911,12 @@ class DocumentProcessor:
                     pass
 
             if uses_outline_level:
-                print(
-                    "[INFO] 文档使用 outline level，将优先使用 outline level 识别层级"
-                )
+                print("[INFO] 采样检测到文档使用 outline level")
 
-            # 收集所有段落（包括普通段落和表格内的段落）
-            all_paragraphs = []
+            # 将表格内的段落也收集起来
             for p in doc.paragraphs:
                 all_paragraphs.append(p)
 
-            # 递归处理表格，确保能够获取到表格内的内容
             def collect_from_table(table):
                 for row in table.rows:
                     for cell in row.cells:
@@ -865,28 +928,67 @@ class DocumentProcessor:
             for t in doc.tables:
                 collect_from_table(t)
 
-            # 第一轮：扫描所有TOC样式，建立映射表（不直接提取章节）
-            # 使用列表存储TOC条目，支持重复标题（按顺序匹配）
-            toc_entries_list = (
-                []
-            )  # [(toc_title, toc_number, toc_level, has_number), ...]
+            # --- 核心性能优化：预提取段落属性 ---
+            print(f"[DOC-PROCESS] 正在扫描 {len(all_paragraphs)} 个段落属性...")
+            para_attr_cache = []
+            style_id_to_name = (
+                {}
+            )  # 性能优化：缓存样式 ID 到名称的映射，避免昂贵的 p.style 访问
 
-            for paragraph in all_paragraphs:
-                text = paragraph.text.strip()
+            for p in all_paragraphs:
+                try:
+                    # 1. 提取文本
+                    t = p.text
+
+                    # 2. 性能优化：通过 style_id 进行样式名称缓存
+                    # p.style_id 是属性访问，极快；p.style 是复杂对象查找，极慢
+                    sid = p.style_id
+                    if sid not in style_id_to_name:
+                        try:
+                            style_id_to_name[sid] = p.style.name
+                        except:
+                            style_id_to_name[sid] = "Normal"
+                    s = style_id_to_name[sid]
+
+                    para_attr_cache.append(
+                        {
+                            "obj": p,
+                            "text": t,
+                            "text_strip": t.strip(),
+                            "style": s,
+                            "style_lower": s.lower(),
+                        }
+                    )
+                except:
+                    # 某些损坏的段落可能报错
+                    para_attr_cache.append(
+                        {
+                            "obj": p,
+                            "text": "",
+                            "text_strip": "",
+                            "style": "Normal",
+                            "style_lower": "normal",
+                        }
+                    )
+
+            # 第一轮：扫描所有TOC样式，建立映射表
+            toc_entries_list = []
+            for p_data in para_attr_cache:
+                text = p_data["text_strip"]
                 if not text:
                     continue
 
-                style_name = paragraph.style.name
+                style_name = p_data["style"]
+                style_lower = p_data["style_lower"]
 
                 # 过滤目录页码行
                 if re.search(r"\.{3,}\s*\d+\s*$", text):
                     continue
 
                 # 检查是否是TOC样式
-                is_toc_style = any(s in style_name.lower() for s in toc_styles)
+                is_toc_style = any(s in style_lower for s in toc_styles)
                 if is_toc_style:
                     # 提取toc样式的编号和标题
-                    # 匹配有编号的: "1. 需求说明" 或 "1   需求说明"（制表符）
                     toc_match = re.match(
                         r"^(\d+(?:\.\d+)*)[.\s\t]+([\u4e00-\u9fa5\w\s()（）]+?)(?:\s+\d+)?$",
                         text,
@@ -895,57 +997,56 @@ class DocumentProcessor:
                         toc_number = toc_match.group(1)
                         toc_title = toc_match.group(2).strip()
                         toc_level = len(toc_number.split("."))
-
-                        # 添加到列表（支持重复标题）
                         toc_entries_list.append(
                             (toc_title, toc_number, toc_level, True, False)
-                        )  # 最后的False表示未使用
-
-                        # 同时保留字典映射（用于快速查找，但会被覆盖）
-                        toc_number_map[toc_title] = (toc_number, toc_level, True)
-
-                        print(
-                            f"[TOC-MAP] 记录TOC映射: {toc_title} -> {toc_number} (Level {toc_level})"
                         )
+                        toc_number_map[toc_title] = (toc_number, toc_level, True)
                     else:
-                        # 匹配无编号的: "版本历史"（仅限toc 1，避免误匹配）
-                        if "toc 1" in style_name.lower():
-                            # 去除页码后的纯标题，且不能以数字开头
+                        if "toc 1" in style_lower:
                             unnumbered_title = re.sub(r"\s+\d+$", "", text).strip()
                             if (
                                 unnumbered_title
                                 and len(unnumbered_title) < 50
                                 and not re.match(r"^\d", unnumbered_title)
                             ):
-                                # 无编号的章节，层级为1，标记为无编号
                                 toc_entries_list.append(
                                     (unnumbered_title, None, 1, False, False)
                                 )
                                 toc_number_map[unnumbered_title] = (None, 1, False)
-                                print(
-                                    f"[TOC-MAP] 记录无编号TOC: {unnumbered_title} (Level 1, 无编号)"
-                                )
 
             # 第二轮：处理所有段落，应用TOC映射
-            # 跟踪是否在"过程说明"、"功能过程"等特殊章节下（用于识别列表项作为子章节）
+            main_processing_start = time.time()
+            print(f"[DOC-PROCESS] 第二轮处理: 正在逐段落解析并应用TOC映射...")
+
             in_procedure_section = False
             procedure_parent_level = 0
-            list_item_counter = 0  # 列表项计数器
+            list_item_counter = 0
 
-            for paragraph in all_paragraphs:
-                text = paragraph.text.strip()
+            sections_found = 0
+            total_paragraphs = len(para_attr_cache)
+            progress_interval = max(1, total_paragraphs // 50)
+
+            for para_idx, p_data in enumerate(para_attr_cache):
+                paragraph = p_data["obj"]
+                # 进度报告
+                if para_idx % progress_interval == 0:
+                    if progress_callback:
+                        progress = min(40 + (para_idx / total_paragraphs) * 40, 80)
+                        progress_callback(
+                            progress, f"正在处理段落: {para_idx}/{total_paragraphs}"
+                        )
+
+                text = p_data["text_strip"]
                 if not text:
                     continue
 
-                style_name = paragraph.style.name
+                style_name = p_data["style"]
+                style_lower = p_data["style_lower"]
 
-                # 过滤目录页码行
                 if re.search(r"\.{3,}\s*\d+\s*$", text):
                     continue
 
-                # 跳过TOC样式（已在第一轮处理）
-                is_toc_style = any(s in style_name.lower() for s in toc_styles)
-                if is_toc_style:
+                if any(s in style_lower for s in toc_styles):
                     continue
 
                 # 【增强】如果正文标题在TOC映射表中，使用TOC的编号
@@ -1873,9 +1974,12 @@ class DocumentProcessor:
                             continue
 
                     # 【控制台调试输出】打印实际获取到的 Word 目录项及其层级
-                    print(
-                        f"[DEBUG-WORD-STRUCTURE] Level: {level} | FinalTitle: {clean_title}"
-                    )
+                    if sections_found < 20:  # 只打印前20个章节的详情
+                        print(
+                            f"[DEBUG-WORD-STRUCTURE] Level: {level} | FinalTitle: {clean_title}"
+                        )
+
+                    sections_found += 1
 
                     # 保存前一个章节
                     if (
@@ -1927,6 +2031,15 @@ class DocumentProcessor:
             # 【可选】如果仍有缺失的中间层级，补充占位符
             # 注意：如果文档有toc目录，这一步通常不需要
             # sections = DocumentProcessor._fill_missing_levels(sections)
+
+            # 输出详细的处理统计
+            final_processing_end = time.time()
+            total_processing_time = final_processing_end - main_processing_start
+            overall_time = final_processing_end - start_time
+            print(f"[DOC-PROCESS] ✓ 第二轮处理完成")
+            print(
+                f"[DOC-PROCESS] 统计: 总章节={len(sections)}, 添加内容行={content_lines_added}, 第二轮耗时={total_processing_time:.2f}秒, 总耗时={overall_time:.2f}秒"
+            )
 
             return sections
         except Exception as e:
@@ -2303,8 +2416,8 @@ class DocumentProcessor:
                     if is_p:
                         p_obj = Paragraph(child, doc)
                         txt = p_obj.text.strip()
-                        # 仅对较短的段落尝试进行目录节点匹配（标题通常不长）
-                        if txt and len(txt) < 200:
+                        # 降低标题识别长度上限 (从 200 降至 100)，避免长句误触发
+                        if txt and len(txt) < 100:
                             # [核心优化]：去除编号后与目录树进行比对锁定位置
                             tmp_txt = txt.lstrip(". \t\n\r")
                             clean_txt = re.sub(
@@ -2322,10 +2435,8 @@ class DocumentProcessor:
                                         tmp_s,
                                     ).strip()
 
-                                    if core_s and (
-                                        clean_txt == core_s
-                                        or (len(clean_txt) > 3 and clean_txt in core_s)
-                                    ):
+                                    # [FIX] 更加严格的匹配：仅匹配完全相等的标题
+                                    if core_s and clean_txt == core_s:
                                         matched_s = s
                                         break
 
@@ -2338,16 +2449,39 @@ class DocumentProcessor:
                                     active_category = "quality"
                                 else:
                                     # 层级退出逻辑：进入了与目标章节同级或更高级的其他章节
-                                    if (
-                                        active_category == "scale"
-                                        and matched_s["level"] <= scale_lvl
-                                    ):
-                                        active_category = None
-                                    elif (
-                                        active_category == "quality"
-                                        and matched_s["level"] <= quality_lvl
-                                    ):
-                                        active_category = None
+                                    # [优化] 增加父子级关系判定：如果是子章节，不自动退出
+                                    is_child = False
+                                    if active_category == "scale" and scale_info:
+                                        # 如果新章节的编号是以父章节编号开头的，视为子章节
+                                        if matched_s.get(
+                                            "parent_num"
+                                        ) == scale_info.get("num") or matched_s.get(
+                                            "num", ""
+                                        ).startswith(
+                                            scale_info.get("num", "NEVERMATCH") + "."
+                                        ):
+                                            is_child = True
+                                    elif active_category == "quality" and quality_info:
+                                        if matched_s.get(
+                                            "parent_num"
+                                        ) == quality_info.get("num") or matched_s.get(
+                                            "num", ""
+                                        ).startswith(
+                                            quality_info.get("num", "NEVERMATCH") + "."
+                                        ):
+                                            is_child = True
+
+                                    if not is_child:
+                                        if (
+                                            active_category == "scale"
+                                            and matched_s["level"] <= scale_lvl
+                                        ):
+                                            active_category = None
+                                        elif (
+                                            active_category == "quality"
+                                            and matched_s["level"] <= quality_lvl
+                                        ):
+                                            active_category = None
 
                                 if last_cat != active_category:
                                     RuntimeLogger.log(
@@ -3095,6 +3229,19 @@ class DocumentProcessor:
 
             matcher = HierarchicalMatcher(fuzzy_match=fuzzy_match, threshold=threshold)
 
+            # [FIX] 优先使用预加载的层级数据
+            # 层级匹配（Step 5）只需要标题结构，即使 content 为空也不应强制重新提取（会导致自动编号逻辑介入）
+            if word_sections_preloaded is None:
+                # 如果没有预加载，且提供了路径，使用稳定模式提取
+                if isinstance(word_path, str) and word_path:
+                    word_sections_preloaded = DocumentProcessor.extract_word_structure(
+                        word_path, use_stable=True
+                    )
+                elif hasattr(word_path, "paragraphs"):
+                    word_sections_preloaded = DocumentProcessor.extract_word_structure(
+                        word_path
+                    )
+
             # 加载配置
             config = MatcherConfig.load()
             h_config = config.get(
@@ -3184,6 +3331,29 @@ class DocumentProcessor:
             saved_path = matcher.save_report(report, report_path)
             report["report_path"] = os.path.abspath(saved_path)
 
+            # [NEW] 同时保存JSON报告到单独的子文件夹
+            json_report_dir = os.path.join(
+                output_dir if output_dir else os.path.dirname(report_path),
+                "json_reports",
+            )
+            if not os.path.exists(json_report_dir):
+                os.makedirs(json_report_dir, exist_ok=True)
+
+            json_report_filename = f"{base_name}-hierarchy_matching.json"
+            json_report_path = os.path.join(json_report_dir, json_report_filename)
+            try:
+                import json
+
+                with open(json_report_path, "w", encoding="utf-8") as f:
+                    json.dump(report, f, ensure_ascii=False, indent=2)
+                report["json_report_path"] = json_report_path
+                if RuntimeLogger:
+                    RuntimeLogger.log(
+                        f"✓ JSON报告已保存: {json_report_path}", level="INFO"
+                    )
+            except Exception as e:
+                print(f"警告: 无法保存JSON报告: {e}")
+
             return report
         except Exception as e:
             print(f"层级匹配校验失败: {e}")
@@ -3202,6 +3372,7 @@ class DocumentProcessor:
         word_sections_preloaded=None,
         project_name=None,
         hierarchy_mapping=None,  # [NEW]
+        preloaded_word_data=None,  # [NEW] 预处理的Word数据
     ):
         """
         节点6：功能过程校验
@@ -3213,26 +3384,24 @@ class DocumentProcessor:
 
             # 如果 word_path 是 Document 对象，使用预加载的数据
             doc = None
-            word_file_path = word_path  # 用于 matcher.match_documents 的参数
+            word_file_path = (
+                word_path  # [FIX] 默认保持为原始输入（可能是 Path 或 Document）
+            )
 
             if hasattr(word_path, "paragraphs") and hasattr(word_path, "element"):
-                # 这是一个 Document 对象，使用预加载的数据
+                # 这是一个 Document 对象
                 doc = word_path
-                # 如果有预加载的sections，直接使用；否则重新提取
+                # 如果有预载的 sections，使用它；否则重新提取
                 if word_sections_preloaded:
                     word_content = word_sections_preloaded
                 else:
-                    # 需要从 Document 对象提取内容
                     word_content = DocumentProcessor.extract_word_structure(doc)
-                # 使用一个占位符文件路径
-                word_file_path = ""
             else:
                 # 这是一个文件路径
                 if word_sections_preloaded:
                     word_content = word_sections_preloaded
                 else:
                     word_content = DocumentProcessor.extract_word_structure(word_path)
-                word_file_path = word_path
 
             # 加载配置
             config = MatcherConfig.load()
@@ -3289,6 +3458,48 @@ class DocumentProcessor:
                 print(f"Error checking column range: {e}")
                 pass
 
+            # === 构建预处理数据包 ===
+            preloaded_data = None
+            if preloaded_word_data:
+                # [优化] 检查预处理数据中是否已包含Excel数据
+                if (
+                    "excel_data" in preloaded_word_data
+                    and preloaded_word_data["excel_data"]
+                ):
+                    # 使用预处理阶段的Excel数据，避免重复读取
+                    excel_data = preloaded_word_data["excel_data"]
+                    print(
+                        f"✅ 使用预处理的Excel数据: {len(excel_data)} 项 (避免重复读取)"
+                    )
+                else:
+                    # 降级: 如果预处理中没有Excel数据，则现在提取
+                    print(f"⚠️ 预处理中缺少Excel数据，现在提取...")
+                    excel_data = matcher.extract_excel_content(
+                        excel_path,
+                        mode="flat",
+                        sheet_name=target_sheet,
+                        header=header_row,
+                        column=func_proc_col,
+                        level1_col=l1_col,
+                        level2_col=l2_col,
+                        level3_col=l3_col,
+                    )
+
+                preloaded_data = {
+                    "items": preloaded_word_data["items"],
+                    "excel_data": excel_data,
+                    "exact_lookup": preloaded_word_data["exact_lookup"],
+                    "toc_items": preloaded_word_data["toc_items"],
+                    "chapter_buckets": preloaded_word_data["chapter_buckets"],
+                    "full_text_content": preloaded_word_data.get(
+                        "full_text_content", []
+                    ),  # 【NEW】全文内容
+                }
+                print(
+                    f"🚀 使用预处理数据: Word={len(preloaded_data['items'])} 项, Excel={len(excel_data)} 项, "
+                    f"全文={len(preloaded_data.get('full_text_content', []))} 项"
+                )
+
             report = matcher.match_documents(
                 word_file_path,
                 excel_path,
@@ -3300,9 +3511,11 @@ class DocumentProcessor:
                 level3_col=l3_col,
                 hierarchy_mapping=hierarchy_mapping,  # [NEW]
                 full_text_search=True,  # 功能过程通常在正文中
+                progress_callback=progress_callback,
                 word_items_preloaded=(
                     word_content if isinstance(word_content, list) else None
                 ),
+                preloaded_data=preloaded_data,  # [NEW] 预处理数据
             )
 
             # 保存报告
