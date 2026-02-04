@@ -359,13 +359,33 @@ class ReceiptFileDialog(QDialog):
 
         project_name = self.name_input.text().strip()
 
+        # 【优化】定义统一的清理关键词，且移除常见日期噪音，确保配对时的对称性
+        def get_core_name(fname):
+            core = fname
+            # 移除日期噪音 (如 20260202, 2025-01-01)
+            core = re.sub(r"202[4-9][-_]?\d{2}[-_]?\d{2}", "", core)
+            # 统一清理关键词 (长项在前)
+            for k in [
+                "评估报告",
+                "结论认同表",
+                "认同表",
+                "确认单",
+                "核定表",
+                "报告",
+                "评估",
+                "认同",
+                "确认",
+                "结论",
+                "副本",
+                ".xlsx",
+                ".xls",
+            ]:
+                core = core.replace(k, "")
+            return core.strip(" -_—")
+
         for r_path in reports:
             r_name = os.path.basename(r_path)
-            # 移除关键词后的核心名称
-            r_core = r_name
-            for k in ["评估报告", "报告", "评估", ".xlsx", ".xls"]:
-                r_core = r_core.replace(k, "")
-            r_core = r_core.strip(" -_")
+            r_core = get_core_name(r_name)
 
             # 寻找最匹配的 consent
             best_match = None
@@ -375,13 +395,15 @@ class ReceiptFileDialog(QDialog):
                 if c_path in processed_consents:
                     continue
                 c_name = os.path.basename(c_path)
-                c_core = c_name
-                for k in ["结论认同表", "认同", "确认", "结论", ".xlsx", ".xls"]:
-                    c_core = c_core.replace(k, "")
-                c_core = c_core.strip(" -_")
+                c_core = get_core_name(c_name)
 
                 # 比较核心名称的相似度（简单包含或相等）
-                if r_core == c_core or r_core in c_core or c_core in r_core:
+                # 增加了非空校验，避免空字符串匹配导致乱对
+                if (
+                    r_core
+                    and c_core
+                    and (r_core == c_core or r_core in c_core or c_core in r_core)
+                ) or (not r_core and not c_core):
                     score = len(os.path.commonprefix([r_core, c_core]))
                     if score > best_score:
                         best_score = score
@@ -425,8 +447,12 @@ class ReceiptFileDialog(QDialog):
             batch_tasks = []
             for group_name, files in file_groups.items():
                 # 使用文件名作为基础名称
-                simple_name = os.path.basename(files["eval_report"]).replace(".xlsx", "").replace(".xls", "")
-                
+                simple_name = (
+                    os.path.basename(files["eval_report"])
+                    .replace(".xlsx", "")
+                    .replace(".xls", "")
+                )
+
                 # 【优化：清理文件名中的冗余信息，优先使用用户输入的项目名称】
                 final_task_name = simple_name
                 if project_name:
@@ -434,9 +460,21 @@ class ReceiptFileDialog(QDialog):
                     if project_name in simple_name:
                         sub_part = simple_name.replace(project_name, "").strip(" -_—")
                         # 进一步清理日期、关键词等噪音
-                        for kw in [r"评估报告", r"结论认同表", r"认同表", r"核定表", r"确认单", r"202[4-6][-_]?\d{2,4}", r"[-_—]?\d{3,5}$", r"副本", r"V\d+"]:
-                            sub_part = re.sub(kw, "", sub_part, flags=re.IGNORECASE).strip(" -_—")
-                        
+                        for kw in [
+                            r"评估报告",
+                            r"结论认同表",
+                            r"认同表",
+                            r"核定表",
+                            r"确认单",
+                            r"202[4-6][-_]?\d{2,4}",
+                            r"[-_—]?\d{3,5}$",
+                            r"副本",
+                            r"V\d+",
+                        ]:
+                            sub_part = re.sub(
+                                kw, "", sub_part, flags=re.IGNORECASE
+                            ).strip(" -_—")
+
                         if sub_part:
                             final_task_name = f"{project_name}-{sub_part}"
                         else:
@@ -444,8 +482,18 @@ class ReceiptFileDialog(QDialog):
                     else:
                         # 如果不包含，则保留原名，但尝试清理噪音
                         cleaned_simple = simple_name
-                        for kw in [r"评估报告", r"结论认同表", r"认同表", r"核定表", r"确认单", r"副本", r"[-_—]?\d{3,5}$"]:
-                            cleaned_simple = re.sub(kw, "", cleaned_simple, flags=re.IGNORECASE).strip(" -_—")
+                        for kw in [
+                            r"评估报告",
+                            r"结论认同表",
+                            r"认同表",
+                            r"核定表",
+                            r"确认单",
+                            r"副本",
+                            r"[-_—]?\d{3,5}$",
+                        ]:
+                            cleaned_simple = re.sub(
+                                kw, "", cleaned_simple, flags=re.IGNORECASE
+                            ).strip(" -_—")
                         final_task_name = cleaned_simple
 
                 sub_data = {

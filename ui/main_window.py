@@ -592,15 +592,38 @@ class CosmicMainWindow(QMainWindow):
         self.theme_btn.clicked.connect(self.toggle_theme)
         btn_group.addWidget(self.theme_btn)
 
+        # 【新增】打开初评文件夹按钮
+        open_dir_btn = QPushButton("📁 打开初评文件夹")
+        open_dir_btn.setObjectName("ThemeBtn")  # 复用辅助按钮样式
+        open_dir_btn.clicked.connect(self.open_initial_review_dir)
+        btn_group.addWidget(open_dir_btn)
+        
         upload_btn = QPushButton("新建审核任务")
         upload_btn.setObjectName("UploadBtn")
         # 移除硬编码样式
         upload_btn.clicked.connect(self.show_upload_dialog)
         btn_group.addWidget(upload_btn)
 
+
+
         header_layout.addLayout(btn_group)
 
         return header
+
+    def open_initial_review_dir(self):
+        """打开初评文件夹"""
+        config = MatcherConfig.load()
+        path = config.get("storage", {}).get("initial_review")
+        if path:
+            # 确保目录存在
+            if not os.path.exists(path):
+                try:
+                    os.makedirs(path)
+                except:
+                    pass
+            open_directory(path)
+        else:
+            QMessageBox.warning(self, "提示", "初评文件夹尚未配置。")
 
     def show_upload_dialog(self):
         dialog = UploadDialog(self)
@@ -888,7 +911,11 @@ class CosmicMainWindow(QMainWindow):
                 stats = result.get("stats", {})
                 excel_reports = result.get("excel_reports", [])
 
-                report_for_card = excel_reports[0] if excel_reports else None
+                # 如果有多个 Excel 报告（如合并模式），传入列表以便 UI 适配显示为文件夹
+                if len(excel_reports) > 1:
+                    report_for_card = excel_reports
+                else:
+                    report_for_card = excel_reports[0] if excel_reports else None
 
                 card.set_completed(excel1=report_for_card, excel2=word_path)
                 card.log_label.setText(f"✅ 生成成功！已保存")

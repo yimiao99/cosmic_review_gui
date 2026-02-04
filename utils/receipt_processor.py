@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import pandas as pd
 import openpyxl
 from datetime import datetime
@@ -350,6 +351,14 @@ class ReceiptProcessor:
             f"开始处理合并任务: {project_name}, 子项目数量: {len(file_groups)}"
         )
 
+        # 【优化】为合并任务创建独立文件夹
+        config = MatcherConfig.load()
+        base_output_dir = config.get("storage", {}).get("receipt", ".")
+        folder_name = f"{project_name}_结果_{datetime.now().strftime('%H%M%S')}"
+        task_dir = os.path.join(base_output_dir, folder_name)
+        if not os.path.exists(task_dir):
+            os.makedirs(task_dir)
+
         # 调试日志：列出文件组
         for gk, fv in file_groups.items():
             RuntimeLogger.log(
@@ -462,6 +471,23 @@ class ReceiptProcessor:
             }
             try:
                 ReceiptProcessor._write_back_to_excel(report_path, context_to_write)
+                # 【优化】回写后复制一份到结果文件夹
+                try:
+                    report_name = os.path.basename(report_path)
+                    target_report_path = os.path.join(task_dir, report_name)
+                    # 如果同名则加序号
+                    if os.path.exists(target_report_path):
+                        base, ext = os.path.splitext(report_name)
+                        target_report_path = os.path.join(
+                            task_dir, f"{base}_{group_name}{ext}"
+                        )
+
+                    shutil.copy2(report_path, target_report_path)
+                    files["copied_report"] = target_report_path
+                except Exception as cp_e:
+                    RuntimeLogger.log(
+                        f"复制Excel到结果文件夹失败: {str(cp_e)}", "warning"
+                    )
             except Exception as e:
                 RuntimeLogger.log(f"回写Excel失败: {str(e)}", "warning")
 
@@ -522,7 +548,7 @@ class ReceiptProcessor:
 
         # 11. 保存 Word
         config = MatcherConfig.load()
-        output_dir = config.get("storage", {}).get("receipt", ".")
+        # 对于合并模式，已经在前面创建了 task_dir，这里直接存入其中
 
         # 【优化】文件名逻辑：防止“项目项目”
         if project_name.endswith("项目"):
@@ -530,23 +556,26 @@ class ReceiptProcessor:
         else:
             output_name = f"{project_name}项目评估确认单.docx"
 
-        final_path = os.path.join(output_dir, output_name)
+        final_path = os.path.join(task_dir, output_name)
 
         counter = 1
         while True:
             try:
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
+                if not os.path.exists(task_dir):
+                    os.makedirs(task_dir)
                 doc.save(final_path)
                 break
             except (IOError, PermissionError):
                 base, ext = os.path.splitext(output_name)
-                final_path = os.path.join(output_dir, f"{base}({counter}){ext}")
+                final_path = os.path.join(task_dir, f"{base}({counter}){ext}")
                 counter += 1
 
         RuntimeLogger.log(f"确认单生成成功: {os.path.basename(final_path)}")
 
-        excel_reports = [f["eval_report"] for f in file_groups.values()]
+        # 收集复制后的Excel报告路径（如果复制失败则保留原路径）
+        excel_reports = [
+            f.get("copied_report", f["eval_report"]) for f in file_groups.values()
+        ]
         return {
             "output_path": final_path,
             "stats": all_stats,
@@ -645,7 +674,11 @@ class ReceiptProcessor:
                     break
 
             # P(16): 标签, Q(17): 数值(公式), R(18): 占比(公式)
-            col_letter = openpyxl.utils.get_column_letter(12)  # L
+            # 【修复】使用实际找到的复用度列索引，而不是硬编码的 12(L)
+            col_idx = (
+                context.get("type_col_idx", 11) + 1
+            )  # pandas 是 0 索引，openpyxl 是 1 索引
+            col_letter = openpyxl.utils.get_column_letter(col_idx)
             total_r_idx = start_row + 3
 
             # 1. 功能点公式回写
@@ -755,6 +788,7 @@ class ReceiptProcessor:
             "legacy_ratio": "0.0%",
             "submission_days": None,
             "eval_days": None,
+            "type_col_idx": 11,  # 默认 L 列 (索引 11)
         }
 
         # 1. 首先尝试从“汇总”或带有关键词的工作表提取人天
@@ -936,37 +970,55 @@ class ReceiptProcessor:
             type_col = -1
             start_data_idx = 0
 
-            # 安全检查：确保 target_df 确实可以进行 len() 操作且不为空
-            try:
-                max_rows = min(100, len(target_df))  # 扩大扫描范围
-            except:
-                max_rows = 0
+            # 【优化】引入投票法：直接统计哪一列包含最多的“新增/复用/利旧”关键字
+            # 这是最稳健的方法，不受表头隐藏或多级表头影响
+            col_scores = []
+            num_cols = len(target_df.columns)
 
-            for i in range(max_rows):
-                row = target_df.iloc[i].values
-                for idx, val in enumerate(row):
-                    if isinstance(val, str) and any(
-                        k in val for k in ["复用度", "开发类型", "类型", "模式"]
+            # 限制扫描行数提高速度，通常前 500 行足够
+            scan_depth = min(500, len(target_df))
+
+            for c_idx in range(num_cols):
+                score = 0
+                # 提取一列数据并转换为字符串
+                col_data = target_df.iloc[:scan_depth, c_idx].astype(str).str.strip()
+                score += col_data.str.contains("新增|增加|新开发", regex=True).sum()
+                score += col_data.str.contains("复用|修改|优化|变更", regex=True).sum()
+                score += col_data.str.contains("利旧|原有|保留", regex=True).sum()
+                col_scores.append(score)
+
+            if any(s > 5 for s in col_scores):  # 至少有 5 行匹配才认为有效
+                type_col = col_scores.index(max(col_scores))
+                RuntimeLogger.log(
+                    f"通过投票法锁定复用度列: 索引 {type_col} (列名: {target_df.columns[type_col]})"
+                )
+                # 寻找数据起始行 (第一个出现关键字的行)
+                col_data = target_df.iloc[:, type_col].astype(str).str.strip()
+                for r_idx, val in enumerate(col_data):
+                    if any(
+                        k in val
+                        for k in ["新增", "增加", "复用", "修改", "利旧", "原有"]
                     ):
-                        # 进一步确认这一列下方是否包含“新增”等关键字
-                        found_kw = False
-                        try:
-                            # 确保不越界
-                            scan_end = min(i + 10, len(target_df))
-                            for next_r in range(i + 1, scan_end):
-                                cell_v = str(target_df.iloc[next_r, idx])
-                                if any(k in cell_v for k in ["新增", "复用", "利旧"]):
-                                    found_kw = True
-                                    break
-                        except:
-                            pass
+                        start_data_idx = r_idx
+                        break
 
-                        if found_kw:
-                            type_col = idx
-                            start_data_idx = i + 1
-                            break
-                if type_col != -1:
-                    break
+            # 如果投票法失败，再从列名（Header）中查找
+            if type_col == -1:
+                for idx, col_name in enumerate(target_df.columns):
+                    if isinstance(col_name, str) and any(
+                        k in col_name for k in ["复用度", "开发类型", "类型", "模式"]
+                    ):
+                        type_col = idx
+                        start_data_idx = 0
+                        break
+
+            # 如果还是没找到，默认使用第 11 列 (L 列)
+            if type_col == -1:
+                RuntimeLogger.log(
+                    "未能自动识别复用度列，默认采用 L 列 (索引 11)", "warning"
+                )
+                type_col = 11
+                start_data_idx = 0
 
             if type_col != -1:
                 new_count = 0
@@ -1044,6 +1096,7 @@ class ReceiptProcessor:
                                 if total_fp > 0
                                 else "0.0%"
                             ),
+                            "type_col_idx": type_col,
                         }
                     )
                     RuntimeLogger.log(
@@ -1058,45 +1111,172 @@ class ReceiptProcessor:
                 "常规统计 FP 失败，开始全表暴力搜索功能点总数...", "warning"
             )
             found_violence = False
+
+            # 【新增】特化搜索：寻找 4行N列 的汇总方块 (新增/复用/利旧/合计)
+            RuntimeLogger.log("启动汇总方块识别...")
             for name, df in df_dict.items():
                 if found_violence:
                     break
-                # 遍寻前 100 行
-                for r_idx in range(min(100, len(df))):
+                try:
+                    RuntimeLogger.log(f"  扫描工作表: {name}, 行数: {len(df)}")
+                    # 遍历所有单元格，寻找"新增"作为起点
+                    max_scan = min(200, len(df) - 3)
+                    for r_idx in range(max_scan):
+                        if found_violence:
+                            break
+                        row_vals = [str(x).strip() for x in df.iloc[r_idx].values]
+                        for c_idx, val in enumerate(row_vals):
+                            if val in ["新增", "新开发", "增加"]:
+                                # 检查接下来几行是否匹配汇总方块模式
+                                try:
+                                    v1 = str(df.iloc[r_idx + 1, c_idx]).strip()
+                                    v2 = str(df.iloc[r_idx + 2, c_idx]).strip()
+                                    v3 = str(df.iloc[r_idx + 3, c_idx]).strip()
+
+                                    if (
+                                        any(k in v1 for k in ["复用", "修改"])
+                                        and any(k in v2 for k in ["利旧", "原有"])
+                                        and any(k in v3 for k in ["合计", "总计", "FP"])
+                                    ):
+                                        RuntimeLogger.log(
+                                            f"    发现汇总方块候选位置: 行{r_idx+1}, 列{c_idx+1}"
+                                        )
+
+                                        # 提取数值 (通常在右侧 1-2 列内)
+                                        for offset in [1, 2]:
+                                            if c_idx + offset >= len(df.columns):
+                                                continue
+                                            try:
+                                                n_str = (
+                                                    str(df.iloc[r_idx, c_idx + offset])
+                                                    .replace(",", "")
+                                                    .strip()
+                                                )
+                                                r_str = (
+                                                    str(
+                                                        df.iloc[
+                                                            r_idx + 1, c_idx + offset
+                                                        ]
+                                                    )
+                                                    .replace(",", "")
+                                                    .strip()
+                                                )
+                                                l_str = (
+                                                    str(
+                                                        df.iloc[
+                                                            r_idx + 2, c_idx + offset
+                                                        ]
+                                                    )
+                                                    .replace(",", "")
+                                                    .strip()
+                                                )
+                                                t_str = (
+                                                    str(
+                                                        df.iloc[
+                                                            r_idx + 3, c_idx + offset
+                                                        ]
+                                                    )
+                                                    .replace(",", "")
+                                                    .strip()
+                                                )
+
+                                                # 过滤掉 nan 和空值
+                                                if any(
+                                                    x in ["nan", "", "None"]
+                                                    for x in [
+                                                        n_str,
+                                                        r_str,
+                                                        l_str,
+                                                        t_str,
+                                                    ]
+                                                ):
+                                                    continue
+
+                                                n = float(n_str)
+                                                r = float(r_str)
+                                                l = float(l_str)
+                                                t = float(t_str)
+
+                                                RuntimeLogger.log(
+                                                    f"      提取数值: 新{n}, 复{r}, 利{l}, 合{t}"
+                                                )
+
+                                                if t > 0 and abs(n + r + l - t) < 2:
+                                                    report_results.update(
+                                                        {
+                                                            "total_fp": int(t),
+                                                            "new_fp": int(n),
+                                                            "reuse_fp": int(r),
+                                                            "legacy_fp": int(l),
+                                                            "new_ratio": f"{(n/t):.1%}",
+                                                            "reuse_ratio": f"{(r/t):.1%}",
+                                                            "legacy_ratio": f"{(l/t):.1%}",
+                                                            "type_col_idx": c_idx,
+                                                        }
+                                                    )
+                                                    RuntimeLogger.log(
+                                                        f"✓ 在 [{name}] 表查获汇总方块: 总计 {int(t)} FP"
+                                                    )
+                                                    found_violence = True
+                                                    break
+                                            except Exception as e2:
+                                                pass
+                                        if found_violence:
+                                            break
+                                except Exception as e1:
+                                    pass
+                except Exception as e0:
+                    RuntimeLogger.log(f"  扫描 {name} 时出错: {str(e0)}", "warning")
+
+            if found_violence:
+                # 成功找到汇总方块，跳过后续暴力搜索
+                pass
+            else:
+                RuntimeLogger.log("未能识别汇总方块，尝试原有暴力搜索...")
+                # 原有的暴力搜索逻辑作为二号兜底
+                for name, df in df_dict.items():
                     if found_violence:
                         break
-                    row = df.iloc[r_idx]
-                    for c_idx, val in enumerate(row):
-                        val_str = str(val).replace(" ", "")
-                        if "功能点" in val_str and any(
-                            k in val_str for k in ["总计", "合计", "数", "FP"]
-                        ):
-                            # 搜索该单元格右侧及下方
-                            for off_r in range(0, 2):
-                                if r_idx + off_r >= len(df):
-                                    break
-                                for off_c in range(1, 4):
-                                    if c_idx + off_c >= len(df.columns):
+                    for r_idx in range(min(100, len(df))):
+                        if found_violence:
+                            break
+                        row = df.iloc[r_idx]
+                        for c_idx, val in enumerate(row):
+                            val_str = str(val).replace(" ", "")
+                            if "功能点" in val_str and any(
+                                k in val_str for k in ["总计", "合计", "数", "FP"]
+                            ):
+                                # 搜索该单元格右侧及下方
+                                for off_r in range(0, 2):
+                                    if r_idx + off_r >= len(df):
                                         break
-                                    cand = str(
-                                        df.iloc[r_idx + off_r, c_idx + off_c]
-                                    ).replace(",", "")
-                                    try:
-                                        v = float(
-                                            re.search(r"(\d+(\.\d+)?)", cand).group(1)
-                                        )
-                                        if v > 1:  # 排除掉太小的干扰项
-                                            report_results["total_fp"] = int(v)
-                                            report_results["new_fp"] = int(v)
-                                            report_results["new_ratio"] = "100.0%"
-                                            RuntimeLogger.log(
-                                                f"-> 暴力搜索在 [{name}] 表 {r_idx+off_r+1}行{c_idx+off_c+1}列 锁定 FP: {v}"
-                                            )
-                                            found_violence = True
+                                    for off_c in range(1, 4):
+                                        if c_idx + off_c >= len(df.columns):
                                             break
-                                    except:
-                                        pass
+                                        cand = str(
+                                            df.iloc[r_idx + off_r, c_idx + off_c]
+                                        ).replace(",", "")
+                                        try:
+                                            v = float(
+                                                re.search(r"(\d+(\.\d+)?)", cand).group(
+                                                    1
+                                                )
+                                            )
+                                            if v > 1:  # 排除掉太小的干扰项
+                                                report_results["total_fp"] = int(v)
+                                                report_results["new_fp"] = int(v)
+                                                report_results["new_ratio"] = "100.0%"
+                                                RuntimeLogger.log(
+                                                    f"-> 暴力搜索在 [{name}] 表 {r_idx+off_r+1}行{c_idx+off_c+1}列 锁定 FP: {v}"
+                                                )
+                                                found_violence = True
+                                                break
+                                        except:
+                                            pass
+                                    if found_violence:
+                                        break
                                 if found_violence:
+                                    break
                                     break
                             if found_violence:
                                 break

@@ -515,16 +515,18 @@ class ReReviewTaskCard(QFrame):
         # 数据行1: 核心FP
         row1 = QHBoxLayout()
         row1.addWidget(
-            QLabel(f"新增: {stats.get('new_fp', '0')} ({stats.get('new_ratio', '0%')})")
-        )
-        row1.addWidget(
             QLabel(
-                f"复用: {stats.get('reuse_fp', '0')} ({stats.get('reuse_ratio', '0%')})"
+                f"新增: {stats.get('new_fp', '0')} ({stats.get('new_ratio', '0.0%')})"
             )
         )
         row1.addWidget(
             QLabel(
-                f"利旧: {stats.get('legacy_fp', '0')} ({stats.get('legacy_ratio', '0%')})"
+                f"复用: {stats.get('reuse_fp', '0')} ({stats.get('reuse_ratio', '0.0%')})"
+            )
+        )
+        row1.addWidget(
+            QLabel(
+                f"利旧: {stats.get('legacy_fp', '0')} ({stats.get('legacy_ratio', '0.0%')})"
             )
         )
         row1.addStretch()
@@ -559,9 +561,9 @@ class ReReviewTaskCard(QFrame):
         # 处理 excel1
         if excel1:
             self.task_info["excel1"] = excel1
-            # 如果是列表，我们需要特殊的处理来“逐个打开”
+            # 如果是列表，通常是合并生成，我们需要特殊的处理来“打开文件夹”
             if isinstance(excel1, list):
-                self.excel1_btn.setText(f"评估报告({len(excel1)}个)")
+                self.excel1_btn.setText(f"评估报告(文件夹)")
             else:
                 self.excel1_btn.setText("评估报告(已回写)")
 
