@@ -46,7 +46,7 @@ class SummaryDialog(QDialog):
         apply_dark_title_bar(self, is_dark)
 
         self.setWindowTitle("审核结果情况汇总")
-        self.setWindowIcon(QIcon(get_resource_path("ui/logo.png")))
+        self.setWindowIcon(QIcon(get_resource_path("ui/logo.ico")))
         self.setMinimumSize(520, 480)
 
         layout = QVBoxLayout(self)
@@ -334,7 +334,7 @@ class ReportDialog(QDialog):
         apply_dark_title_bar(self, is_dark)
 
         self.setWindowTitle("Cosmic 智能审核报告 - 模板校验详情")
-        self.setWindowIcon(QIcon(get_resource_path("ui/logo.png")))
+        self.setWindowIcon(QIcon(get_resource_path("ui/logo.ico")))
         self.setMinimumSize(800, 600)
 
         layout = QVBoxLayout(self)

@@ -10,11 +10,138 @@
         "sheet_name": 2
     },
     "storage": {
-        "initial_review": "D:/Desktop/comsic/chuping",
-        "re_review": "D:/Desktop/comsic/chongping",
-        "receipt": "D:/Desktop/comsic/huidan"
+        "initial_review": "D:\\Desktop\\comsic\\chuping",
+        "re_review": "D:\\Desktop\\comsic\\chongping",
+        "receipt": "D:\\Desktop\\comsic\\huidan",
+        "logs": "E:\\work\\code\\work\\cosmic_review_gui\\logs",
+        "extraction": "D:\\Desktop\\comsic\\Extraction"
     },
+    "theme": {
+        "primary_color": "#2563eb",
+        "text_color_light": "#1e293b",
+        "text_color_dark": "#f3f4f6",
+        "font_family": "Microsoft YaHei UI",
+        "font_size": 14,
+        "is_dark": true
+    },
+    "log_level": "INFO",
     "automation": {
-        "auto_open": false
+        "auto_open": false,
+        "reuse_threshold": 80
+    },
+    "evaluation_folder": "E:\\work\\code\\work\\comsic_training\\data\\raw",
+    "evaluation_rules": {
+        "write_keywords": [
+            "更新",
+            "保存",
+            "删除",
+            "写入",
+            "修改",
+            "新增",
+            "创建",
+            "同步",
+            "清空",
+            "变更",
+            "录入"
+        ],
+        "read_keywords": [
+            "读取",
+            "检索",
+            "查询",
+            "查看",
+            "获取",
+            "搜索",
+            "定位",
+            "加载",
+            "统计"
+        ],
+        "exit_keywords": [
+            "显示",
+            "展示",
+            "结果",
+            "导出",
+            "下载",
+            "响应",
+            "回显",
+            "推送",
+            "返回"
+        ],
+        "entry_keywords": [
+            "点击",
+            "输入",
+            "按钮",
+            "发送",
+            "接收",
+            "提交",
+            "请求",
+            "触发",
+            "勾选"
+        ],
+        "ew_group_keywords": [
+            "新增",
+            "删除",
+            "修改",
+            "导入",
+            "上传",
+            "创建",
+            "保存",
+            "更新",
+            "同步",
+            "处理",
+            "注销",
+            "重置",
+            "通过",
+            "拒绝",
+            "配置",
+            "变更"
+        ],
+        "erx_group_keywords": [
+            "查看",
+            "查询",
+            "下载",
+            "导出",
+            "搜索",
+            "浏览",
+            "列表",
+            "获取",
+            "详情",
+            "展示",
+            "显示",
+            "统计",
+            "分析",
+            "报表",
+            "图表"
+        ],
+        "ew_reuse_keywords": [
+            "新增",
+            "修改",
+            "删除",
+            "导入"
+        ],
+        "erx_reuse_keywords": [
+            "查询",
+            "查看",
+            "导出"
+        ],
+        "legacy_keywords": [
+            "利旧",
+            "内存",
+            "缓存",
+            "校验",
+            "由于"
+        ]
+    },
+    "title_cleanup": {
+        "suffix_keywords": [
+            "一级功能模块",
+            "二级功能模块",
+            "三级功能模块",
+            "功能模块",
+            "模块"
+        ],
+        "regex_patterns": [
+            "[（(][一二三级123]+[级]?功能模块[)）]",
+            "[（(][一二三级123]+级[)）]"
+        ]
     }
 }

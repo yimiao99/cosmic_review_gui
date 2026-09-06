@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QApplication,
     QStackedWidget,
-    QMessageBox,
+    QMessageBox, QDialog,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPalette
@@ -22,6 +22,8 @@ from .upload_dialog import UploadDialog  # ✅ 使用相对导入
 from .re_review_dialog import ReReviewUploadDialog  # ✅ 新增重评对话框
 from .re_review_card import ReReviewTaskCard  # ✅ 新增重评卡片
 from .receipt_dialog import ReceiptFileDialog
+from .evaluation_dialog import EvaluationDialog  # ✅ 新增评估对话框
+from .evaluation_card import EvaluationTaskCard  # ✅ 新增评估卡片
 from .sidebar import Sidebar  # ✅ 导入侧边栏
 from .settings_widget import SettingsWidget  # ✅ 导入设置组件
 from extend.matcher_config import MatcherConfig  # ✅ 导入配置类
@@ -44,7 +46,7 @@ class CosmicMainWindow(QMainWindow):
 
         # 设置窗口图标
         # 如果你有 logo.png 请放在 ui 目录下，这里先写逻辑
-        self.setWindowIcon(QIcon(get_resource_path("ui/logo.png")))
+        self.setWindowIcon(QIcon(get_resource_path("ui/logo.ico")))
 
         # 主容器
         self.central_widget = QWidget()
@@ -80,12 +82,14 @@ class CosmicMainWindow(QMainWindow):
         self.page_initial_review = self._create_initial_review_page()
         self.page_receipt = self._create_receipt_page()
         self.page_re_review = self._create_re_review_page()  # ✅ 使用正式的重评页面
+        # self.page_evaluation = self._create_evaluation_page()  # ✅ 新增评估页面
         self.page_settings = SettingsWidget()  # ✅ 使用正式的设置页面
 
         self.stacked_widget.addWidget(self.page_home)
         self.stacked_widget.addWidget(self.page_initial_review)
         self.stacked_widget.addWidget(self.page_receipt)
         self.stacked_widget.addWidget(self.page_re_review)
+        # self.stacked_widget.addWidget(self.page_evaluation)
         self.stacked_widget.addWidget(self.page_settings)
 
         # 监听设置更新
@@ -166,10 +170,14 @@ class CosmicMainWindow(QMainWindow):
         re_review_btn = self._create_shortcut_btn(
             "新增重评任务", "#f59e0b", self.show_re_review_dialog
         )
+        # evaluation_btn = self._create_shortcut_btn(
+        #     "新增COSMIC评估", "#8b5cf6", self.show_evaluation_dialog
+        # )
 
         biz_layout.addWidget(upload_btn)
         biz_layout.addWidget(receipt_btn)
         biz_layout.addWidget(re_review_btn)
+        # biz_layout.addWidget(evaluation_btn)
 
         biz_layout.addSpacing(20)
 
@@ -668,7 +676,7 @@ class CosmicMainWindow(QMainWindow):
             # 如果已经有结果（比如重载），则保持原有逻辑
             step1_status = "done"  # 示例简化
 
-        # ✅ 8 个步骤，加入环境准备节点 0
+        # ✅ 10 个步骤，加入环境准备节点 0 和数据属性重复检测节点 9
         steps = [
             ("环境准备", "pending"),
             ("模板校验", "pending"),
@@ -678,6 +686,8 @@ class CosmicMainWindow(QMainWindow):
             ("层级匹配", "pending"),
             ("功能过程", "pending"),
             ("功能过程数据移动类型", "pending"),
+            ("资产清单匹配", "pending"),
+            ("数据属性重复检测", "pending"),
         ]
 
         logs = {
@@ -690,6 +700,7 @@ class CosmicMainWindow(QMainWindow):
             6: "等待执行...",
             7: "等待执行...",
             8: "等待执行...",
+            9: "等待执行...",
         }
 
         # 默认日志（显示在卡片底部）
@@ -976,3 +987,177 @@ class CosmicMainWindow(QMainWindow):
         worker.error.connect(lambda: self.receipt_workers.remove(worker))
 
         worker.start()
+
+    def _create_evaluation_page(self):
+        """创建评估页面"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header
+        header = QFrame()
+        header.setObjectName("HeaderFrame")
+        header.setFixedHeight(80)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(30, 0, 30, 0)
+
+        title = QLabel("📊 COSMIC 评估")
+        title.setStyleSheet("font-size: 24px; font-weight: bold;")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+
+        # 新增评估按钮
+        self.evaluation_btn = QPushButton("新增评估任务")
+        self.evaluation_btn.setObjectName("EvaluationBtn")
+        self.evaluation_btn.setFixedSize(150, 40)
+        self.evaluation_btn.clicked.connect(self.show_evaluation_dialog)
+        header_layout.addWidget(self.evaluation_btn)
+
+        layout.addWidget(header)
+
+        # Content - Scroll Area for Task Cards
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border: none; background: transparent;")
+
+        scroll_content = QWidget()
+        scroll_content.setObjectName("EvaluationScrollContent")
+        self.evaluation_task_layout = QVBoxLayout(scroll_content)
+        self.evaluation_task_layout.setContentsMargins(30, 20, 30, 20)
+        self.evaluation_task_layout.setSpacing(15)
+        self.evaluation_task_layout.addStretch()
+
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll, stretch=1)
+
+        return page
+
+    def show_evaluation_dialog(self):
+        """显示评估对话框"""
+        dialog = EvaluationDialog(self)
+        dialog.evaluation_requested.connect(self.start_evaluation_task)
+        dialog.exec()
+
+    def start_evaluation_task(self, task_info):
+        """启动评估任务并显示卡片"""
+        # 1. 添加卡片并跳转
+        self.add_evaluation_task(task_info)
+        
+        # 2. 启动后台 Worker
+        from utils.evaluation_processor import EvaluationWorker
+        
+        # 查找刚才添加的卡片以更新状态
+        card = None
+        for i in range(self.evaluation_task_layout.count()):
+            item = self.evaluation_task_layout.itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), EvaluationTaskCard):
+                if item.widget().task_id == task_info["task_id"]:
+                    card = item.widget()
+                    break
+        
+        if not card:
+            return
+
+        worker = EvaluationWorker(
+            architecture_doc_path=task_info.get("architecture_file_path"),
+            evaluation_excel_path=task_info["evaluation_excel_path"],
+            architecture_text=task_info.get("architecture_input"),
+            manday=task_info["manday"],
+            is_manual_mode=True,
+            is_auto_evaluate=task_info.get("is_auto_evaluate", False),
+            project_name=task_info.get("project_name")
+        )
+
+        if not hasattr(self, "evaluation_workers"):
+            self.evaluation_workers = []
+        self.evaluation_workers.append(worker)
+
+        # 连接 Worker 信号
+        def on_finished(output_path):
+            card.update_status("已完成")
+            # 记录当前日志路径到卡片
+            from utils.runtime_logger import RuntimeLogger
+            log_path = RuntimeLogger.get_current_log_path()
+            card.log_path = log_path
+            
+            card.set_output_file(output_path)
+            # 在卡片上更新
+            card.view_btn.setVisible(True)
+            card.log_btn.setVisible(True)
+            self.evaluation_workers.remove(worker)
+
+        def on_error(msg):
+            card.update_status("失败")
+            QMessageBox.critical(self, "评估出错", f"项目 {task_info['project_name']} 评估失败:\n{msg}")
+            self.evaluation_workers.remove(worker)
+
+        # 新增项目：处理人工验证请求
+        def on_verify_requested(results, callback):
+            from ui.evaluation_dialog import ResultVerificationDialog
+            dialog = ResultVerificationDialog(results, self, source_excel=worker.evaluation_excel_path)
+            if dialog.exec() == QDialog.Accepted:
+                callback(dialog.final_results)
+            else:
+                # 如果用户取消，默认传回原结果或空
+                callback(results)
+
+        worker.finished.connect(on_finished)
+        worker.error.connect(on_error)
+        worker.verify_requested.connect(on_verify_requested)
+        worker.start()
+        
+        card.update_status("评估中...")
+
+    def add_evaluation_task(self, task_info):
+        """添加评估任务卡片"""
+        # 自动跳转到评估页面 (Index 4)
+        self.sidebar.on_item_clicked(4)
+
+        # 创建并显示卡片
+        card = EvaluationTaskCard(
+            task_id=task_info.get("task_id", ""),
+            project_name=task_info.get("project_name", "评估任务"),
+            architecture_file=task_info.get("architecture_file", ""),
+            evaluation_file=task_info.get("evaluation_excel_path") or task_info.get("evaluation_file", ""),
+            output_file=task_info.get("output_file"),
+            log_path=task_info.get("log_path"),
+            status=task_info.get("status", "待评估"),
+        )
+
+        # 连接信号
+        card.view_clicked.connect(self.open_file_location)
+        card.log_clicked.connect(lambda: self.open_file_location(card.log_path))
+        card.delete_clicked.connect(self.delete_evaluation_task)
+
+        self.evaluation_task_layout.insertWidget(0, card)
+
+    def open_file_location(self, file_path):
+        """打开文件 (自动关联程序)"""
+        if file_path and os.path.exists(file_path):
+            open_directory(file_path)
+        else:
+            QMessageBox.warning(self, "错误", "文件不存在")
+
+    def delete_evaluation_task(self, task_id):
+        """删除评估任务卡片"""
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            "确定要删除此评估任务吗？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            # 从布局中移除卡片
+            for i in range(self.evaluation_task_layout.count()):
+                item = self.evaluation_task_layout.itemAt(i)
+                if (
+                    item
+                    and item.widget()
+                    and isinstance(item.widget(), EvaluationTaskCard)
+                ):
+                    if item.widget().task_id == task_id:
+                        widget = item.widget()
+                        self.evaluation_task_layout.removeWidget(widget)
+                        widget.deleteLater()
+                        break

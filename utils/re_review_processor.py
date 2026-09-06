@@ -1,12 +1,12 @@
 import os
 import re
-import openpyxl
-from openpyxl.utils import get_column_letter
-from PySide6.QtCore import QThread, Signal
 
+import openpyxl
+from PySide6.QtCore import QThread, Signal
+# 重评逻辑
 
 class ReReviewWorker(QThread):
-    """异步处理重评任务的线程"""
+    """Background worker for a re-review task."""
 
     progress = Signal(int)
     finished = Signal(tuple)
@@ -21,311 +21,241 @@ class ReReviewWorker(QThread):
 
     def run(self):
         from utils.runtime_logger import RuntimeLogger
-        
-        # 设置项目名称用于日志
+
         RuntimeLogger.set_project(self.project_name)
         RuntimeLogger.log("开始重评处理...")
-        
         try:
-            p1, p2 = ReReviewProcessor.process_re_review(
+            result = ReReviewProcessor.process_re_review(
                 self.excel1_path, self.excel2_path, self.output_dir, self.progress.emit
             )
-            self.finished.emit((p1, p2))
-        except Exception as e:
+            self.finished.emit(result)
+        except Exception as exc:
             import traceback
 
             traceback.print_exc()
-            self.error.emit(str(e))
+            self.error.emit(str(exc))
 
 
 class ReReviewProcessor:
-    """重评自动标注处理器"""
+    """Create re-review annotations between the old report and new receipt."""
+
+    START_ROW = 5
+    CURRENT_REUSE_COL = 20  # T
+    NEW_ID_COL = 21  # U
+    PREVIOUS_REUSE_COL = 16  # P
+    PREVIOUS_RESULT_COL = 17  # Q
+    REMARK_COL = 15  # O
 
     @staticmethod
     def find_column(ws, names, default_col, search_rows=10):
-        # ... existing code ...
-        """在工作表中搜索包含特定名称的列"""
         if isinstance(names, str):
             names = [names]
-
-        for r in range(1, search_rows + 1):
-            for c in range(1, ws.max_column + 1):
-                val = ws.cell(row=r, column=c).value
-                if val:
-                    val_str = str(val)
-                    for name in names:
-                        if name in val_str:
-                            return c
+        for row in range(1, search_rows + 1):
+            for col in range(1, ws.max_column + 1):
+                value = ws.cell(row=row, column=col).value
+                if value is not None and any(name in str(value) for name in names):
+                    return col
         return default_col
 
     @staticmethod
-    def transform_remark(old_remark, new_id):
-        """智能生成新备注：[新标号] [剩余文字]"""
-        if old_remark is None:
-            return ""
+    def _split_sheet(wb):
+        exact_names = ["功能点拆分表", "2、功能点拆分表", "拆分表"]
+        for name in exact_names:
+            if name in wb.sheetnames:
+                return wb[name]
+        for name in wb.sheetnames:
+            if "功能点拆分" in name or "拆分表" in name:
+                return wb[name]
+        raise ValueError("无法在文件中找到功能点拆分表工作表")
 
-        txt = str(old_remark).strip()
-        if not txt:
-            return ""
+    @classmethod
+    def _build_rows(cls, ws, func_col, desc_col):
+        """Return row metadata keyed by an occurrence-aware process key.
 
-        # N 或 O 保持不变
-        if txt.upper() in ["N", "O"]:
-            return txt.upper()
+        Excel returns None for non-top-left cells in merged functional-process cells.
+        We forward-fill that process name.  A process can also contain identical H
+        values, so the appearance index is part of the key; this prevents VLOOKUP
+        from resolving every duplicate to the first row.
+        """
+        rows = {}
+        current_process = ""
+        occurrences = {}
+        for row in range(cls.START_ROW, ws.max_row + 1):
+            process_value = ws.cell(row=row, column=func_col).value
+            if process_value is not None and str(process_value).strip():
+                current_process = str(process_value).strip()
 
-        # 匹配第一个数字序列
-        match = re.search(r"\d+", txt)
-        if match:
-            start, end = match.span()
-            # 替换该数字序列为新 ID
-            return txt[:start] + str(new_id) + txt[end:]
-        else:
-            # 无数字说明是纯文字，按 MD 逻辑： T5 & " " & txt
-            return f"{new_id} {txt}"
+            description_value = ws.cell(row=row, column=desc_col).value
+            if description_value is None or not str(description_value).strip():
+                continue
+            description = str(description_value).strip()
+            base_key = (current_process, description)
+            occurrences[base_key] = occurrences.get(base_key, 0) + 1
+            rows[row] = {
+                "key": (
+                    f"{len(current_process)}:{current_process}"
+                    f"{len(description)}:{description}#{occurrences[base_key]}"
+                ),
+                "process": current_process,
+                "description": description,
+            }
+        return rows
 
     @staticmethod
-    def process_re_review(excel1_path, excel2_path, output_dir, progress_callback=None):
-        """
-        处理重评逻辑：
-        excel1_path: 评估报告 (需要添加公式)
-        excel2_path: 重评回单 (需要同步结果)
-        output_dir: 保存目录
+    def _replace_first_number(value, replacement):
+        text = str(value).strip()
+        match = re.search(r"\d+", text)
+        if not match:
+            return text
+        start, end = match.span()
+        if text == match.group():
+            return replacement
+        return text[:start] + str(replacement) + text[end:]
+
+    @classmethod
+    def process_re_review(cls, excel1_path, excel2_path, output_dir, progress_callback=None):
+        """Process Excel1 (old assessment report) and Excel2 (new re-review receipt).
+
+        Excel2 P/Q are calculated from the old L/O columns first; then Excel1 T/U
+        VLOOKUP those two new-table results.  Missing rows are represented as N/A.
         """
         if progress_callback:
             progress_callback(5)
 
-        # 1. 加载工作簿
-        # wb1: 评估报告 (Excel1) - 需要加载两次：一次用于公式保存，一次用于数据读取
         wb1_formula = openpyxl.load_workbook(excel1_path)
-        wb1_val = openpyxl.load_workbook(excel1_path, data_only=True)
-
-        if progress_callback:
-            progress_callback(15)
-
-        # wb2: 重评回单 (Excel2) - 用于读取数据和保存结果
-        wb2_val = openpyxl.load_workbook(excel2_path, data_only=True)
+        wb1_value = openpyxl.load_workbook(excel1_path, data_only=True)
+        wb2_value = openpyxl.load_workbook(excel2_path, data_only=True)
         wb2_final = openpyxl.load_workbook(excel2_path)
+        try:
+            if progress_callback:
+                progress_callback(25)
 
-        if progress_callback:
-            progress_callback(25)
+            ws1_formula = cls._split_sheet(wb1_formula)
+            ws1_value = cls._split_sheet(wb1_value)
+            ws2_value = cls._split_sheet(wb2_value)
+            ws2_final = cls._split_sheet(wb2_final)
 
-        def get_split_sheet(wb):
-            names = ["功能点拆分表", "2、功能点拆分表", "拆分表"]
-            for name in names:
-                if name in wb.sheetnames:
-                    return wb[name]
-            for name in wb.sheetnames:
-                if "功能点拆分" in name:
-                    return wb[name]
-            raise ValueError(f"无法在文件中找到功能点拆分表工作表")
+            desc_col1 = cls.find_column(ws1_value, ["子过程描述", "功能点拆分描述", "子过程"], 8)
+            func_col1 = cls.find_column(ws1_value, ["功能过程", "功能简述", "功能点"], 6)
+            desc_col2 = cls.find_column(ws2_value, ["子过程描述", "功能点拆分描述", "子过程"], 8)
+            func_col2 = cls.find_column(ws2_value, ["功能过程", "功能简述", "功能点"], 6)
 
-        ws1_formula = get_split_sheet(wb1_formula)
-        ws1_val = get_split_sheet(wb1_val)
-        ws2_val = get_split_sheet(wb2_val)
-        ws2_final = get_split_sheet(wb2_final)
+            excel1_rows = cls._build_rows(ws1_value, func_col1, desc_col1)
+            excel2_rows = cls._build_rows(ws2_value, func_col2, desc_col2)
 
-        # 获取列索引 (支持多种可能的列表头名称)
-        desc_col1 = ReReviewProcessor.find_column(
-            ws1_val, ["子过程描述", "功能点拆分描述", "子过程"], 8
-        )
-        func_col1 = ReReviewProcessor.find_column(
-            ws1_val, ["功能过程", "功能简述", "功能点"], 6
-        )
+            def group_key(data):
+                return data["process"], data["description"]
 
-        desc_col2 = ReReviewProcessor.find_column(
-            ws2_val, ["子过程描述", "功能点拆分描述", "子过程"], 8
-        )
-        func_col2 = ReReviewProcessor.find_column(
-            ws2_val, ["功能过程", "功能简述", "功能点"], 6
-        )
-        remark_col2 = ReReviewProcessor.find_column(ws2_val, ["备注", "原备注"], 15)
+            old_groups = {}
+            new_groups = {}
+            for row, data in excel1_rows.items():
+                old_groups.setdefault(group_key(data), []).append(row)
+            for row, data in excel2_rows.items():
+                new_groups.setdefault(group_key(data), []).append(row)
 
-        start_row = 5
+            # Match each new row to the nearest unused old row in the same merged-G
+            # process / H-description group.  This is deliberately not a plain
+            # VLOOKUP: duplicate H values must not all resolve to the first row.
+            new_to_old = {}
+            assigned_old_rows = set()
+            for new_row, new_data in excel2_rows.items():
+                candidates = old_groups.get(group_key(new_data), [])
+                available = [row for row in candidates if row not in assigned_old_rows]
+                selected_from = available or candidates
+                if selected_from:
+                    old_row = min(selected_from, key=lambda row: (abs(row - new_row), row))
+                    new_to_old[new_row] = old_row
+                    assigned_old_rows.add(old_row)
 
-        # ========== 建立数据映射用于结果计算 ==========
-        # 使用 (功能过程, 子过程描述) 作为联合主键
-        excel1_idx_to_data = {}  # {row_idx: (func, desc)}
-        excel1_key_to_idx = {}  # {(func, desc): row_idx}
+            def reuse_category(value):
+                text = str(value).strip() if value is not None else ""
+                if "新增" in text:
+                    return "新增"
+                if "复用" in text:
+                    return "复用"
+                if "利旧" in text:
+                    return "利旧"
+                return "N/A"
 
-        for r in range(start_row, ws1_val.max_row + 1):
-            d_val = ws1_val.cell(row=r, column=desc_col1).value
-            f_val = ws1_val.cell(row=r, column=func_col1).value
-            if d_val:
-                desc = str(d_val).strip()
-                func = str(f_val).strip() if f_val else ""
-                excel1_idx_to_data[r] = (func, desc)
-                excel1_key_to_idx[(func, desc)] = r
-
-        excel2_key_to_idx = {}  # {(func, desc): row_idx}
-        for r in range(start_row, ws2_val.max_row + 1):
-            d_val = ws2_val.cell(row=r, column=desc_col2).value
-            f_val = ws2_val.cell(row=r, column=func_col2).value
-            if d_val or f_val:
-                desc = str(d_val).strip() if d_val else ""
-                func = str(f_val).strip() if f_val else ""
-                excel2_key_to_idx[(func, desc)] = r
-
-        if progress_callback:
-            progress_callback(35)
-
-        # ========== 步骤 1: 在 Excel1 中创建辅助工作表 Sheet1 ==========
-        if "Sheet1" in wb1_formula.sheetnames:
-            del wb1_formula["Sheet1"]
-        ws_sheet1 = wb1_formula.create_sheet("Sheet1")
-
-        # 匹配截图中的表头结构
-        # A: Excel1行号 | B: Excel1映射主键 | C: Excel2映射主键 | D: Excel2行号
-        ws_sheet1.cell(row=1, column=1).value = 1
-        ws_sheet1.cell(row=1, column=4).value = 1
-        ws_sheet1.cell(row=3, column=2).value = "Excel1组合键"
-        ws_sheet1.cell(row=3, column=3).value = "Excel2组合键"
-
-        # 填充 Excel1 数据到 Sheet1
-        for r, data in excel1_idx_to_data.items():
-            ws_sheet1.cell(row=r, column=1).value = r
-            # 使用公式拼接主表的 功能过程 和 子过程描述
-            f_ref = f"'{ws1_formula.title}'!{get_column_letter(func_col1)}{r}"
-            d_ref = f"'{ws1_formula.title}'!{get_column_letter(desc_col1)}{r}"
-            ws_sheet1.cell(row=r, column=2).value = f"=TRIM({f_ref}) & TRIM({d_ref})"
-
-        # 填充 Excel2 数据到 Sheet1 (C, D列)
-        for key, r in excel2_key_to_idx.items():
-            # 组合键 (Python 直接拼接)
-            ws_sheet1.cell(row=r, column=3).value = key[0] + key[1]
-            ws_sheet1.cell(row=r, column=4).value = r
-
-        # ========== 步骤 2 & 3: 在 Excel1 中添加公式 ==========
-        col_q = 17  # Q (17) 匹配检查
-        col_r = 18  # R (18) 备注对应描述
-        col_s = 19  # S (19) 备注对应标号 (新增处理列)
-        col_o = 15  # O (15) 备注
-        col_t = 20  # T (20) 新标号
-
-        ws1_formula.cell(row=start_row - 1, column=col_q).value = "匹配检查"
-        ws1_formula.cell(row=start_row - 1, column=col_r).value = "备注对应描述"
-        ws1_formula.cell(row=start_row - 1, column=col_s).value = "备注处理(ID)"
-        ws1_formula.cell(row=start_row - 1, column=col_t).value = "新标号"
-
-        for r in range(start_row, ws1_formula.max_row + 1):
-            col_o_ref = f"{get_column_letter(col_o)}{r}"
-            col_r_ref = f"{get_column_letter(col_r)}{r}"
-            col_s_ref = f"{get_column_letter(col_s)}{r}"
-
-            # S列: 备注处理 (提取其中的 ID)
-            # 使用 Excel 技巧提取字符串中的第一个数字序列
-            # 如果是 n,123 或 123,文字，该公式能较好地提取出 123
-            ws1_formula.cell(row=r, column=col_s).value = (
-                f'=IFERROR(LOOKUP(9.9E+307,--LEFT(MID({col_o_ref},MIN(FIND({{0,1,2,3,4,5,6,7,8,9}},{col_o_ref}&"0123456789")),99),ROW($1:$99))),"")'
-            )
-
-            # Q列: 匹配检查
-            curr_key_formula = f"TRIM({get_column_letter(func_col1)}{r}) & TRIM({get_column_letter(desc_col1)}{r})"
-            ws1_formula.cell(row=r, column=col_q).value = (
-                f'=IFERROR(VLOOKUP({curr_key_formula}, Sheet1!$C:$C, 1, 0), "")'
-            )
-
-            # R列: 备注对应描述 (现在查找的是 S 列处理后的 ID)
-            ws1_formula.cell(row=r, column=col_r).value = (
-                f'=IFERROR(VLOOKUP({col_s_ref}, Sheet1!$A:$B, 2, 0), "")'
-            )
-
-            # T列: 新标号
-            formula_t = (
-                f'=IF({col_o_ref}="", "", '
-                f'IF(OR(UPPER(TRIM({col_o_ref}))="N", UPPER(TRIM({col_o_ref}))="O"), {col_o_ref}, '
-                f'IFERROR(VLOOKUP({col_r_ref}, Sheet1!$C:$D, 2, 0), "")))'
-            )
-
-            ws1_formula.cell(row=r, column=col_t).value = formula_t
-
-        if progress_callback:
-            progress_callback(60)
-
-        # ========== 步骤 4: 处理 Excel2 (重评回单) 的结果赋值到 P 列 ==========
-        col_p = 16  # P 列 (结果存放列)
-        ws2_final.cell(row=start_row - 1, column=col_p).value = "新标号(P)"
-
-        for r in range(start_row, ws2_val.max_row + 1):
-            desc2 = ws2_val.cell(row=r, column=desc_col2).value
-            func2 = ws2_val.cell(row=r, column=func_col2).value
-
-            if not desc2 and not func2:
-                ws2_final.cell(row=r, column=col_p).value = ""
-                continue
-
-            desc2_str = str(desc2).strip() if desc2 else ""
-            func2_str = str(func2).strip() if func2 else ""
-            key2 = (func2_str, desc2_str)
-
-            # 保证excel2的子功能描述和功能过程都和excel1一样，才进行填充
-            if key2 in excel1_key_to_idx:
-                # 找到 excel1 中对应的行
-                r1 = excel1_key_to_idx[key2]
-                # 获取 excel1 中的备注 (作为同步源)
-                remark1 = ws1_val.cell(row=r1, column=col_o).value
-
-                if not remark1:
-                    # 原来是空的，新的也应该是空
-                    ws2_final.cell(row=r, column=col_p).value = ""
-                elif str(remark1).strip().upper() in ["N", "O"]:
-                    # n/N 都原样输出
-                    ws2_final.cell(row=r, column=col_p).value = str(remark1).strip()
+            # New receipt P/Q are the source of truth.  For a referenced old row,
+            # use the earliest new row in that same G/H group as the new identifier.
+            ws2_final.cell(row=cls.START_ROW - 1, column=cls.PREVIOUS_REUSE_COL).value = "上一轮复用度"
+            ws2_final.cell(row=cls.START_ROW - 1, column=cls.PREVIOUS_RESULT_COL).value = "新标号"
+            new_results_by_old_row = {}
+            for new_row in range(cls.START_ROW, ws2_value.max_row + 1):
+                old_row = new_to_old.get(new_row)
+                category = reuse_category(ws1_value.cell(row=old_row, column=12).value) if old_row else "N/A"
+                if category == "N/A":
+                    new_identifier = "N/A"
+                elif category == "新增":
+                    new_identifier = 0
                 else:
-                    # 处理带标号的情况
-                    txt = str(remark1).strip()
-                    match = re.search(r"\d+", txt)
-                    if match:
-                        old_id_str = match.group()
-                        try:
-                            old_row_idx = int(old_id_str)
-                            # 查询 excel1 中该标号指向的描述和功能
-                            if old_row_idx in excel1_idx_to_data:
-                                ref_key = excel1_idx_to_data[old_row_idx]
-                                # 查询该描述+功能在当前 excel2 中的新行号
-                                if ref_key in excel2_key_to_idx:
-                                    new_row_idx = excel2_key_to_idx[ref_key]
-                                    start, end = match.span()
-                                    
-                                    # 如果原始文本就是一个单纯的数字，则输出为数字类型
-                                    if txt == old_id_str:
-                                        ws2_final.cell(row=r, column=col_p).value = new_row_idx
-                                    else:
-                                        # 否则拼接字符串
-                                        new_val = txt[:start] + str(new_row_idx) + txt[end:]
-                                        ws2_final.cell(row=r, column=col_p).value = new_val
-                                else:
-                                    ws2_final.cell(row=r, column=col_p).value = txt
-                            else:
-                                ws2_final.cell(row=r, column=col_p).value = txt
-                        except:
-                            ws2_final.cell(row=r, column=col_p).value = txt
+                    remark = ws1_value.cell(row=old_row, column=cls.REMARK_COL).value
+                    text = str(remark).strip() if remark is not None else ""
+                    if category == "利旧" and not text:
+                        new_identifier = "N"
+                    elif not text:
+                        new_identifier = "N/A"
                     else:
-                        ws2_final.cell(row=r, column=col_p).value = txt
-            else:
-                # 描述或功能不匹配，不填充
-                ws2_final.cell(row=r, column=col_p).value = ""
+                        match = re.search(r"\d+", text)
+                        reference_data = excel1_rows.get(int(match.group())) if match else None
+                        target_rows = new_groups.get(group_key(reference_data), []) if reference_data else []
+                        # Directly fill the earliest reusable row for duplicate H values.
+                        new_identifier = (
+                            cls._replace_first_number(text, min(target_rows))
+                            if target_rows else text
+                        )
+                ws2_final.cell(row=new_row, column=cls.PREVIOUS_REUSE_COL).value = category
+                ws2_final.cell(row=new_row, column=cls.PREVIOUS_RESULT_COL).value = new_identifier
+                if old_row is not None and old_row not in new_results_by_old_row:
+                    new_results_by_old_row[old_row] = (new_row, category, new_identifier)
 
-        # ========== 保存文件 ==========
-        if progress_callback:
-            progress_callback(85)
+            if progress_callback:
+                progress_callback(60)
 
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+            if "Sheet1" in wb1_formula.sheetnames:
+                del wb1_formula["Sheet1"]
+            helper = wb1_formula.create_sheet("Sheet1")
+            helper.cell(row=3, column=1).value = "旧表行号"
+            helper.cell(row=3, column=2).value = "旧表唯一键"
+            helper.cell(row=3, column=3).value = "新表行号"
+            helper.cell(row=3, column=4).value = "新表唯一键"
+            helper.cell(row=3, column=5).value = "新表上一轮复用度"
+            helper.cell(row=3, column=6).value = "新表新标号"
+            for old_row, data in excel1_rows.items():
+                helper.cell(row=old_row, column=1).value = old_row
+                helper.cell(row=old_row, column=2).value = data["key"]
+                result = new_results_by_old_row.get(old_row)
+                if result:
+                    new_row, category, new_identifier = result
+                    helper.cell(row=old_row, column=3).value = new_row
+                    helper.cell(row=old_row, column=4).value = excel2_rows[new_row]["key"]
+                    helper.cell(row=old_row, column=5).value = category
+                    helper.cell(row=old_row, column=6).value = new_identifier
 
-        filename1 = os.path.basename(excel1_path)
-        filename2 = os.path.basename(excel2_path)
+            # Excel1 T/U only VLOOKUP the two computed results from the new receipt.
+            ws1_formula.cell(row=cls.START_ROW - 1, column=cls.CURRENT_REUSE_COL).value = "最新复用度"
+            ws1_formula.cell(row=cls.START_ROW - 1, column=cls.NEW_ID_COL).value = "新标号"
+            for old_row in range(cls.START_ROW, ws1_formula.max_row + 1):
+                ws1_formula.cell(row=old_row, column=cls.CURRENT_REUSE_COL).value = (
+                    f'=IFERROR(VLOOKUP(ROW(),Sheet1!$A:$F,5,FALSE),"N/A")'
+                )
+                ws1_formula.cell(row=old_row, column=cls.NEW_ID_COL).value = (
+                    f'=IFERROR(VLOOKUP(ROW(),Sheet1!$A:$F,6,FALSE),"N/A")'
+                )
 
-        path1 = os.path.join(output_dir, filename1)
-        path2 = os.path.join(output_dir, filename2)
-
-        wb1_formula.save(path1)
-        wb2_final.save(path2)
-
-        if progress_callback:
-            progress_callback(100)
-
-        wb1_formula.close()
-        wb1_val.close()
-        wb2_val.close()
-        wb2_final.close()
-
-        return path1, path2
+            if progress_callback:
+                progress_callback(85)
+            os.makedirs(output_dir, exist_ok=True)
+            path1 = os.path.join(output_dir, os.path.basename(excel1_path))
+            path2 = os.path.join(output_dir, os.path.basename(excel2_path))
+            wb1_formula.save(path1)
+            wb2_final.save(path2)
+            if progress_callback:
+                progress_callback(100)
+            return path1, path2
+        finally:
+            wb1_formula.close()
+            wb1_value.close()
+            wb2_value.close()
+            wb2_final.close()

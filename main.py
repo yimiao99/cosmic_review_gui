@@ -1,86 +1,55 @@
+# -*- coding: utf-8 -*-
 import sys
 import os
+import traceback
 
 # ==========================================================
-# 0. 适配高分屏 (解决字体模糊问题)
+# 0. PyInstaller 打包环境兼容性修复 (核心：解决图标/字体不显示)
 # ==========================================================
-if sys.platform == "win32":
-    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
-    os.environ["QT_AUTOSCREENSCALEFACTOR"] = "1"
+if getattr(sys, 'frozen', False):
+    # 如果是打包后的环境
+    base_path = sys._MEIPASS
 
-# ==========================================================
-# 1. 核心修复：解决 PySide6 DLL 加载冲突 (必须在任何 PySide6 导入之前)
-# ==========================================================
-if sys.platform == "win32":
-    # 获取基础运行目录
-    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    # 1. 强制指定 Qt 插件路径 (解决图标、下拉箭头、字体渲染等 UI 元素丢失问题)
+    qt_plugin_path = os.path.join(base_path, 'PySide6', 'plugins')
+    if os.path.exists(qt_plugin_path):
+        os.environ['QT_PLUGIN_PATH'] = qt_plugin_path
+        # 告诉 QCoreApplication 去哪里找插件
+        from PySide6.QtCore import QCoreApplication
 
-    # 清理环境变量 PATH 中的干扰项
-    if "PATH" in os.environ:
-        os.environ["PATH"] = os.pathsep.join(
-            [
-                p
-                for p in os.environ["PATH"].split(os.pathsep)
-                if "ACE Studio" not in p and "Anaconda" not in p
-            ]
-        )
+        QCoreApplication.addLibraryPath(qt_plugin_path)
 
-    # 确定 PySide6 DLL 的潜在目录（增加对 _internal 的搜寻）
-    pyside_dll_dirs = []
+    # 2. 将 PySide6 目录加入系统 PATH (解决部分底层 DLL 或字体加载失败的问题)
+    pyside6_path = os.path.join(base_path, 'PySide6')
+    if os.path.exists(pyside6_path):
+        os.environ['PATH'] = pyside6_path + os.pathsep + os.environ.get('PATH', '')
+else:
+    # 开发环境
+    base_path = os.path.abspath(os.path.dirname(__file__))
 
-    if getattr(sys, "frozen", False):
-        # 打包后的环境：可能是 onefile 根目录，也可能是 onedir 的 _internal 目录
-        internal_dir = os.path.join(base_dir, "_internal")
-        search_roots = (
-            [base_dir, internal_dir] if os.path.exists(internal_dir) else [base_dir]
-        )
-
-        for root in search_roots:
-            pyside_dll_dirs.extend(
-                [root, os.path.join(root, "PySide6"), os.path.join(root, "shiboken6")]
-            )
-    else:
-        # 开发环境
-        try:
-            import importlib.util
-
-            for module_name in ["PySide6", "shiboken6"]:
-                spec = importlib.util.find_spec(module_name)
-                if spec and spec.origin:
-                    pyside_dll_dirs.append(os.path.dirname(spec.origin))
-        except ImportError:
-            pass
-
-    # 显式添加所有有效的 DLL 搜索路径并置于 PATH 最前
-    for d in reversed(pyside_dll_dirs):  # 反向遍历确保最精细的目录在 PATH 最前面
-        if os.path.exists(d):
-            if hasattr(os, "add_dll_directory"):
-                try:
-                    os.add_dll_directory(d)
-                except Exception:
-                    pass
-            os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
+# 将项目根目录加入 sys.path，确保内部模块导入正常
+sys.path.insert(0, base_path)
 
 # ==========================================================
-# 2. 项目路径与依赖导入
+# 1. 核心依赖导入
 # ==========================================================
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 try:
     from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QIcon
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFont, QIcon
+
     from ui.main_window import CosmicMainWindow
     from utils.path_utils import get_resource_path
-    from utils.runtime_logger import RuntimeLogger  # ✅ 导入日志器
+    from utils.runtime_logger import RuntimeLogger
+    from extend.matcher_config import MatcherConfig
 except ImportError as e:
-    # 如果失败，弹出更具体的调试信息
+    print(f"核心组件加载失败: {e}")
     if sys.platform == "win32":
         import ctypes
 
-        search_info = "\n".join([d for d in pyside_dll_dirs if os.path.exists(d)])
         ctypes.windll.user32.MessageBoxW(
             0,
-            f"DLL 加载失败。\n\n错误: {e}\n\n搜寻目录:\n{search_info}",
+            f"核心组件加载失败。\n\n错误: {e}\n\n请检查 PySide6 是否安装完整，或依赖是否缺失。",
             "启动失败",
             16,
         )
@@ -88,40 +57,74 @@ except ImportError as e:
 
 
 def main():
-    # 设置高 DPI 缩放策略 (在 QApplication 实例化前)
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QIcon
-
+    """主程序入口"""
+    # 1. 设置高 DPI 缩放策略 (必须在 QApplication 实例化前)
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
+    # 2. 创建应用实例
     app = QApplication(sys.argv)
+
+    # 3. 设置全局样式 (Fusion 样式在不同平台上表现更一致)
     app.setStyle("Fusion")
 
-    # 设置全局默认字体
-    from PySide6.QtGui import QFont
-
+    # 4. 设置全局默认字体 (解决部分 Windows 环境下字体渲染发虚或默认字体不对的问题)
+    # 优先使用微软雅黑，如果系统没有则回退到系统默认
     font = QFont("Microsoft YaHei UI", 9)
+    if not font.exactMatch():
+        font = QFont("Microsoft YaHei", 9)
     app.setFont(font)
 
+    # 5. 设置应用图标 (兼容打包环境，使用 get_resource_path)
     try:
-        logo_path = get_resource_path("ui/logo.png")
-        if os.path.exists(logo_path):
-            app.setWindowIcon(QIcon(logo_path))
-    except Exception:
-        pass
+        # 尝试加载 .ico 或 .png 格式的图标
+        icon_path = get_resource_path("ui/logo.png")
+        if not os.path.exists(icon_path):
+            icon_path = get_resource_path("ui/logo.ico")
 
-    window = CosmicMainWindow()
-    window.show()
+        if os.path.exists(icon_path):
+            app_icon = QIcon(icon_path)
+            app.setWindowIcon(app_icon)
+        else:
+            print(f"警告: 未找到应用图标文件: {icon_path}")
+    except Exception as e:
+        print(f"设置应用图标时发生异常: {e}")
+
+    # 6. 创建并显示主窗口
+    try:
+        window = CosmicMainWindow()
+        window.show()
+    except Exception as e:
+        print(f"主窗口初始化失败: {e}")
+        traceback.print_exc()
+        return 1
+
+    # 7. 启动事件循环
     return app.exec()
 
 
 if __name__ == "__main__":
+    # 启动全局日志会话
     RuntimeLogger.start_session()
+
     try:
+        # 执行主程序
         exit_code = main()
         sys.exit(exit_code)
+    except Exception as e:
+        # 捕获未处理的顶层异常并记录到日志
+        error_msg = f"程序发生严重未捕获错误:\n{str(e)}\n\n{traceback.format_exc()}"
+        print(error_msg)
+        try:
+            RuntimeLogger.log(error_msg, level="ERROR")
+        except:
+            pass
+        sys.exit(1)
     finally:
-        RuntimeLogger.save_session()
+        # 确保程序退出时保存日志并释放资源
+        try:
+            RuntimeLogger.save_session()
+            RuntimeLogger.close_file()
+        except:
+            pass

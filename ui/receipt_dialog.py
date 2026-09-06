@@ -117,7 +117,7 @@ class ReceiptFileDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("评估确认单配置")
         self.setMinimumSize(800, 700)
-        self.setWindowIcon(QIcon(get_resource_path("ui/logo.png")))
+        self.setWindowIcon(QIcon(get_resource_path("ui/logo.ico")))
         self.setObjectName("ReceiptFileDialog")
         self.setAcceptDrops(True)  # 支持全局拖拽
 

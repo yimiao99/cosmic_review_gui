@@ -17,9 +17,6 @@ def get_light_theme_stylesheet():
     item_bg = "#ffffff"
 
     return f"""
-    QWidget {{
-        font-family: '{font_family}';
-    }}
     QMainWindow, QDialog {{
         background-color: {bg_main};
     }}
@@ -414,5 +411,52 @@ def get_light_theme_stylesheet():
         border: none;
         max-width: 1px;
         min-width: 1px;
+    }}
+    
+    /* ContentSection - 内容区块样式 */
+    QFrame[class="ContentSection"] {{
+        background-color: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+    }}
+    
+    /* ModeBtn - 模式选择按钮样式 */
+    QPushButton[class="ModeBtn"] {{
+        background-color: white;
+        color: {text_color};
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 8px 20px;
+        font-size: 13px;
+        font-weight: bold;
+    }}
+    QPushButton[class="ModeBtn"]:hover {{
+        background-color: #f8fafc;
+        border-color: {primary};
+    }}
+    QPushButton[class="ModeBtn"]:checked {{
+        background-color: {primary};
+        color: white;
+        border-color: {primary};
+    }}
+    
+    /* SecondaryBtn - 次要按钮样式 */
+    QPushButton[class="SecondaryBtn"] {{
+        background-color: white;
+        color: {text_color};
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        padding: 8px 16px;
+        font-size: 12px;
+        font-weight: bold;
+    }}
+    QPushButton[class="SecondaryBtn"]:hover {{
+        background-color: #f8fafc;
+        border-color: {primary};
+    }}
+    QPushButton[class="SecondaryBtn"]:disabled {{
+        background-color: #f8fafc;
+        color: #cbd5e1;
+        border-color: #e2e8f0;
     }}
 """

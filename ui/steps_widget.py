@@ -69,7 +69,12 @@ class StepCircle(QWidget):
             elif self.status == "skipped":
                 text = "-"
 
-            painter.setPen(QPen(Qt.white, 2.5))
+            # skipped状态使用半透明白色，其他状态使用纯白色
+            if self.status == "skipped":
+                painter.setPen(QPen(QColor(255, 255, 255, 180), 2.5))
+            else:
+                painter.setPen(QPen(Qt.white, 2.5))
+            
             font = QFont("Microsoft YaHei UI", 11, QFont.Bold)
             painter.setFont(font)
             painter.drawText(rect, Qt.AlignCenter, text)
@@ -235,6 +240,9 @@ class StepNode(QWidget):
             text_color = "#ef4444"
         elif status == "processing":
             text_color = "#3b82f6"
+        elif status == "skipped":
+            # skipped状态使用灰色，表示禁用/跳过
+            text_color = "#94a3b8" if not is_dark else "#64748b"
         else:
             text_color = "#475569" if not is_dark else "#94a3b8"
 
@@ -342,8 +350,8 @@ class StepsWidget(QWidget):
             total_val = 100.0
 
         # 采用与 ValidationWorker 任务分配点一致的非线性分段 (优化权重)
-        # 0:环境准备(0-15), 1:模板(15-30), 2:空值(30-33), 3:比例(33-36), 4:因子(36-39), 5:层级(39-70), 6:过程(70-95), 7:移动(95-100)
-        breakpoints = [0, 15, 30, 33, 36, 39, 70, 95, 100]
+        # 0:环境准备(0-15), 1:模板(15-30), 2:空值(30-33), 3:比例(33-36), 4:因子(36-39), 5:层级(39-70), 6:过程(70-95), 7:移动(95-96), 8:资产匹配(96-100)
+        breakpoints = [0, 15, 30, 33, 36, 39, 70, 95, 96, 100]
 
         for i, line in enumerate(self.step_lines):
             if i >= len(breakpoints) - 1:

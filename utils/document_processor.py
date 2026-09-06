@@ -467,6 +467,82 @@ class DocumentProcessor:
             raise
 
     @staticmethod
+    def extract_images_from_word(file_path):
+        """
+        从 Word 文档中提取图片。
+        策略：先尝试寻找“功能架构图”相关章节提取图片，如果失败则提取全部图片。
+        """
+        import os
+        import tempfile
+        import zipfile
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        temp_dir = tempfile.mkdtemp()
+        image_paths = []
+        
+        try:
+            # 1. 尝试定位目标章节
+            doc = Document(file_path)
+            keywords = ["功能架构图", "业务架构", "逻辑架构", "系统架构", "架构图", "功能结构"]
+            
+            target_rids = []
+            found_section = False
+            
+            for para in doc.paragraphs:
+                text = para.text.strip()
+                # 匹配章节标题
+                if any(kw in text for kw in keywords) and (para.style.name.startswith('Heading') or para.style.name == 'Title'):
+                    found_section = True
+                    continue
+                
+                # 如果已在章节内，遇到下一个标题则可能结束（简化处理：持续提取直到遇到图片或下一个大章节）
+                if found_section:
+                    # 查找当前段落的所有图片引用
+                    blips = para._element.xpath('.//a:blip')
+                    for blip in blips:
+                        rid = blip.get(qn('r:embed'))
+                        if rid: target_rids.append(rid)
+                    
+                    # 如果进入了明显不相关的章节标题，可以退出，但为了保险我们这里多找几段
+            
+            # 提取选定的 rId
+            for rid in target_rids:
+                try:
+                    part = doc.part.related_parts[rid]
+                    ext = part.partname.split('.')[-1]
+                    img_name = f"section_{len(image_paths)+1}.{ext}"
+                    img_path = os.path.join(temp_dir, img_name)
+                    with open(img_path, 'wb') as f:
+                        f.write(part.blob)
+                    image_paths.append(img_path)
+                except:
+                    continue
+        except Exception as e:
+            print(f"[EXTRACT-DOCX] 章节定位逻辑异常: {e}")
+
+        # 2. 兜底：如果章节内没找到，或者文档不是 .docx，则通过 Zip 提取所有媒体
+        if not image_paths:
+            try:
+                with zipfile.ZipFile(file_path, 'r') as zf:
+                    for item in zf.namelist():
+                        if item.startswith('word/media/'):
+                            ext = item.split('.')[-1].lower()
+                            if ext in ['png', 'jpg', 'jpeg', 'bmp', 'gif']:
+                                img_name = os.path.basename(item)
+                                img_path = os.path.join(temp_dir, img_name)
+                                with open(img_path, 'wb') as f:
+                                    f.write(zf.read(item))
+                                image_paths.append(img_path)
+            except Exception as e:
+                print(f"[EXTRACT-DOCX] ZIP全量提取失败: {e}")
+
+        # 记录临时目录以便后续清理
+        DocumentProcessor._temp_files.append(temp_dir)
+        # 去重返回
+        return sorted(list(set(image_paths)))
+
+    @staticmethod
     def extract_word_structure(file_path, use_stable=False, progress_callback=None):
         """
         提取 Word 文档的全层级标题及正文
@@ -2897,6 +2973,239 @@ class DocumentProcessor:
                 except:
                     pass
 
+    # @staticmethod
+    # def check_excel_empty_cells(file_path, sheet_name=None):
+    #     """
+    #     检查 Excel 的空值情况 (精准合并单元格判定版 V3)
+    #     """
+    #     try:
+    #         import openpyxl
+    #
+    #         wb = openpyxl.load_workbook(file_path, data_only=True)
+    #         target_sheet_name = sheet_name
+    #         if not target_sheet_name:
+    #             for name in wb.sheetnames:
+    #                 if "功能点拆分" in name:
+    #                     target_sheet_name = name
+    #                     break
+    #
+    #         if not target_sheet_name or target_sheet_name not in wb.sheetnames:
+    #             if not sheet_name and wb.sheetnames:
+    #                 target_sheet_name = wb.sheetnames[0]
+    #             else:
+    #                 return {
+    #                     "is_ok": False,
+    #                     "errors": ["未找到有效的工作表进行空值校验"],
+    #                 }
+    #
+    #         ws = wb[target_sheet_name]
+    #
+    #         # 1. 探测表头区域 (多行探测)
+    #         header_start = -1
+    #         header_end = -1
+    #         # 探测前 30 行，寻找核心关键字
+    #         for row_idx in range(1, 31):
+    #             row_vals = [
+    #                 str(ws.cell(row=row_idx, column=col).value) for col in range(1, 20)
+    #             ]
+    #             row_str = " ".join([v for v in row_vals if v != "None"])
+    #             if "客户需求" in row_str or "一级模块" in row_str:
+    #                 if header_start == -1:
+    #                     header_start = row_idx
+    #                 header_end = row_idx
+    #
+    #         if header_start == -1:
+    #             return {
+    #                 "is_ok": False,
+    #                 "errors": ["未能在工作表中定位到“客户需求”或“一级模块”表头行"],
+    #             }
+    #
+    #         # 2. 定位关键校验列
+    #         target_keywords = [
+    #             "客户需求",
+    #             "一级模块",
+    #             "二级模块",
+    #             "三级模块",
+    #             "功能用户",
+    #             "触发事件",
+    #             "功能过程",
+    #             "子过程描述",
+    #             "数据移动类型",
+    #             "数据组",
+    #             "数据属性",
+    #             "复用度",
+    #             "CFP",
+    #         ]
+    #
+    #         col_map = {}  # {keyword: col_index_1_based}
+    #         for col_idx in range(1, ws.max_column + 1):
+    #             # 检查 header_end 这一行，或其上方的表头行
+    #             cell_val = ""
+    #             for h_idx in range(header_start, header_end + 1):
+    #                 val = ws.cell(row=h_idx, column=col_idx).value
+    #                 if val:
+    #                     cell_val += str(val)
+    #
+    #             for kw in target_keywords:
+    #                 if kw in cell_val:
+    #                     col_map[kw] = col_idx
+    #                     break
+    #
+    #         if not col_map:
+    #             return {
+    #                 "is_ok": False,
+    #                 "errors": ["未匹配到任何待校验的关键列，请检查表头名称"],
+    #             }
+    #
+    #         # 3. 确定有效数据范围
+    #         last_valid_row = header_end
+    #         for r in range(header_end + 1, ws.max_row + 1):
+    #             # 检查是否触底 (图3中的注记文字)
+    #             first_cell_val = str(ws.cell(row=r, column=1).value or "").strip()
+    #             if (
+    #                 first_cell_val.startswith("注：")
+    #                 or "请在正式提交时删除" in first_cell_val
+    #             ):
+    #                 break
+    #
+    #             # 检查整行是否有数据
+    #             row_has_something = False
+    #             for c in range(1, 21):  # 检测前20列
+    #                 if ws.cell(row=r, column=c).value is not None:
+    #                     row_has_something = True
+    #                     break
+    #
+    #             if row_has_something:
+    #                 last_valid_row = r
+    #
+    #         if last_valid_row <= header_end:
+    #             # 可能是个空表，除了表头没数据
+    #             return {"is_ok": True, "errors": []}
+    #
+    #         # 4. 建立合并单元格查询表 (row, col) -> (top_left_value)
+    #         merged_lookup = {}
+    #         for merged_range in ws.merged_cells.ranges:
+    #             min_col, min_row, max_col, max_row = merged_range.bounds
+    #             tl_val = ws.cell(row=min_row, column=min_col).value
+    #             for r in range(min_row, max_row + 1):
+    #                 for c in range(min_col, max_col + 1):
+    #                     merged_lookup[(r, c)] = tl_val
+    #
+    #         # 5. 遍历扫描 (核心：不再跳过整天空行)
+    #         col_errors = {kw: [] for kw in col_map.keys()}
+    #
+    #         for r_idx in range(header_end + 1, last_valid_row + 1):
+    #             for kw, c_idx in col_map.items():
+    #                 val = ws.cell(row=r_idx, column=c_idx).value
+    #
+    #                 # 确定最终判定值
+    #                 actual_val = val
+    #                 if (
+    #                     val is None
+    #                     or str(val).strip() == ""
+    #                     or str(val).lower() == "nan"
+    #                 ):
+    #                     if (r_idx, c_idx) in merged_lookup:
+    #                         actual_val = merged_lookup[(r_idx, c_idx)]
+    #
+    #                 if (
+    #                     actual_val is None
+    #                     or str(actual_val).strip() == ""
+    #                     or str(actual_val).lower() == "nan"
+    #                 ):
+    #                     col_errors[kw].append(r_idx)
+    #
+    #         # 6. 格式化错误信息 (合并连续行)
+    #         final_errors = []
+    #         for kw in target_keywords:  # 按预定义顺序排列
+    #             if kw not in col_errors:
+    #                 continue
+    #             rows = sorted(list(set(col_errors[kw])))
+    #             if not rows:
+    #                 continue
+    #
+    #             ranges = []
+    #             start = rows[0]
+    #             prev = start
+    #             for curr in rows[1:]:
+    #                 if curr == prev + 1:
+    #                     prev = curr
+    #                 else:
+    #                     ranges.append(
+    #                         f"{start}-{prev}" if start != prev else f"{start}"
+    #                     )
+    #                     start = curr
+    #                     prev = curr
+    #             ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+    #             final_errors.append(f"拆分表中第{', '.join(ranges)}行{kw}为空")
+    #
+    #         # 7. 生成报告文件 (包含时间戳)
+    #         report_path = None
+    #         if True:  # 总是生成报告供查询
+    #             try:
+    #                 import pandas as pd
+    #                 from datetime import datetime
+    #
+    #                 # 获取项目名称 (不含路径和扩展名)
+    #                 base_name = os.path.splitext(os.path.basename(file_path))[0]
+    #
+    #                 # 生成时间戳
+    #                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #
+    #                 # 报告文件名: 项目名_时间戳_Excel空值检查报告.xlsx
+    #                 report_filename = f"{base_name}_{timestamp}_Excel空值检查报告.xlsx"
+    #
+    #                 # 使用配置中的存放位置
+    #                 from extend.matcher_config import MatcherConfig
+    #
+    #                 config = MatcherConfig.load()
+    #                 output_dir = config.get("storage", {}).get("initial_review")
+    #                 if output_dir:
+    #                     output_dir = os.path.abspath(output_dir)
+    #                     if not os.path.exists(output_dir):
+    #                         os.makedirs(output_dir, exist_ok=True)
+    #                 else:
+    #                     output_dir = "."
+    #
+    #                 report_path = os.path.join(output_dir, report_filename)
+    #
+    #                 # 生成报告数据
+    #                 report_data = []
+    #                 if final_errors:
+    #                     for error_msg in final_errors:
+    #                         report_data.append({"检查项": error_msg})
+    #                 else:
+    #                     report_data.append({"检查项": "✅ 所有关键列空值检查通过"})
+    #
+    #                 # 写入Excel
+    #                 df_report = pd.DataFrame(report_data)
+    #                 with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
+    #                     df_report.to_excel(
+    #                         writer, index=False, sheet_name="空值检查结果"
+    #                     )
+    #
+    #             except Exception as e:
+    #                 # 报告生成失败不影响主流程
+    #                 try:
+    #                     from utils.runtime_logger import RuntimeLogger
+    #
+    #                     RuntimeLogger.log(
+    #                         f"生成Excel空值检查报告失败: {e}", level="WARN"
+    #                     )
+    #                 except:
+    #                     pass
+    #
+    #         return {
+    #             "is_ok": len(final_errors) == 0,
+    #             "errors": final_errors,
+    #             "report_path": report_path,
+    #         }
+    #     except Exception as e:
+    #         return {
+    #             "is_ok": False,
+    #             "errors": [f"Excel 校验引擎异常 (V3): {str(e)}"],
+    #             "report_path": None,
+    #         }
     @staticmethod
     def check_excel_empty_cells(file_path, sheet_name=None):
         """
@@ -2904,7 +3213,6 @@ class DocumentProcessor:
         """
         try:
             import openpyxl
-
             wb = openpyxl.load_workbook(file_path, data_only=True)
             target_sheet_name = sheet_name
             if not target_sheet_name:
@@ -2912,7 +3220,6 @@ class DocumentProcessor:
                     if "功能点拆分" in name:
                         target_sheet_name = name
                         break
-
             if not target_sheet_name or target_sheet_name not in wb.sheetnames:
                 if not sheet_name and wb.sheetnames:
                     target_sheet_name = wb.sheetnames[0]
@@ -2921,13 +3228,10 @@ class DocumentProcessor:
                         "is_ok": False,
                         "errors": ["未找到有效的工作表进行空值校验"],
                     }
-
             ws = wb[target_sheet_name]
-
             # 1. 探测表头区域 (多行探测)
             header_start = -1
             header_end = -1
-            # 探测前 30 行，寻找核心关键字
             for row_idx in range(1, 31):
                 row_vals = [
                     str(ws.cell(row=row_idx, column=col).value) for col in range(1, 20)
@@ -2937,76 +3241,49 @@ class DocumentProcessor:
                     if header_start == -1:
                         header_start = row_idx
                     header_end = row_idx
-
             if header_start == -1:
                 return {
                     "is_ok": False,
                     "errors": ["未能在工作表中定位到“客户需求”或“一级模块”表头行"],
                 }
-
             # 2. 定位关键校验列
             target_keywords = [
-                "客户需求",
-                "一级模块",
-                "二级模块",
-                "三级模块",
-                "功能用户",
-                "触发事件",
-                "功能过程",
-                "子过程描述",
-                "数据移动类型",
-                "数据组",
-                "数据属性",
-                "复用度",
-                "CFP",
+                "客户需求", "一级模块", "二级模块", "三级模块", "功能用户",
+                "触发事件", "功能过程", "子过程描述", "数据移动类型",
+                "数据组", "数据属性", "复用度", "CFP",
             ]
-
-            col_map = {}  # {keyword: col_index_1_based}
+            col_map = {}
             for col_idx in range(1, ws.max_column + 1):
-                # 检查 header_end 这一行，或其上方的表头行
                 cell_val = ""
                 for h_idx in range(header_start, header_end + 1):
                     val = ws.cell(row=h_idx, column=col_idx).value
                     if val:
                         cell_val += str(val)
-
                 for kw in target_keywords:
                     if kw in cell_val:
                         col_map[kw] = col_idx
                         break
-
             if not col_map:
                 return {
                     "is_ok": False,
                     "errors": ["未匹配到任何待校验的关键列，请检查表头名称"],
                 }
-
             # 3. 确定有效数据范围
             last_valid_row = header_end
             for r in range(header_end + 1, ws.max_row + 1):
-                # 检查是否触底 (图3中的注记文字)
                 first_cell_val = str(ws.cell(row=r, column=1).value or "").strip()
-                if (
-                    first_cell_val.startswith("注：")
-                    or "请在正式提交时删除" in first_cell_val
-                ):
+                if first_cell_val.startswith("注：") or "请在正式提交时删除" in first_cell_val:
                     break
-
-                # 检查整行是否有数据
                 row_has_something = False
-                for c in range(1, 21):  # 检测前20列
+                for c in range(1, 21):
                     if ws.cell(row=r, column=c).value is not None:
                         row_has_something = True
                         break
-
                 if row_has_something:
                     last_valid_row = r
-
             if last_valid_row <= header_end:
-                # 可能是个空表，除了表头没数据
                 return {"is_ok": True, "errors": []}
-
-            # 4. 建立合并单元格查询表 (row, col) -> (top_left_value)
+            # 4. 建立合并单元格查询表
             merged_lookup = {}
             for merged_range in ws.merged_cells.ranges:
                 min_col, min_row, max_col, max_row = merged_range.bounds
@@ -3014,40 +3291,25 @@ class DocumentProcessor:
                 for r in range(min_row, max_row + 1):
                     for c in range(min_col, max_col + 1):
                         merged_lookup[(r, c)] = tl_val
-
-            # 5. 遍历扫描 (核心：不再跳过整天空行)
+            # 5. 遍历扫描
             col_errors = {kw: [] for kw in col_map.keys()}
-
             for r_idx in range(header_end + 1, last_valid_row + 1):
                 for kw, c_idx in col_map.items():
                     val = ws.cell(row=r_idx, column=c_idx).value
-
-                    # 确定最终判定值
                     actual_val = val
-                    if (
-                        val is None
-                        or str(val).strip() == ""
-                        or str(val).lower() == "nan"
-                    ):
+                    if val is None or str(val).strip() == "" or str(val).lower() == "nan":
                         if (r_idx, c_idx) in merged_lookup:
                             actual_val = merged_lookup[(r_idx, c_idx)]
-
-                    if (
-                        actual_val is None
-                        or str(actual_val).strip() == ""
-                        or str(actual_val).lower() == "nan"
-                    ):
+                    if actual_val is None or str(actual_val).strip() == "" or str(actual_val).lower() == "nan":
                         col_errors[kw].append(r_idx)
-
-            # 6. 格式化错误信息 (合并连续行)
+            # 6. 格式化错误信息
             final_errors = []
-            for kw in target_keywords:  # 按预定义顺序排列
+            for kw in target_keywords:
                 if kw not in col_errors:
                     continue
                 rows = sorted(list(set(col_errors[kw])))
                 if not rows:
                     continue
-
                 ranges = []
                 start = rows[0]
                 prev = start
@@ -3055,9 +3317,7 @@ class DocumentProcessor:
                     if curr == prev + 1:
                         prev = curr
                     else:
-                        ranges.append(
-                            f"{start}-{prev}" if start != prev else f"{start}"
-                        )
+                        ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
                         start = curr
                         prev = curr
                 ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
@@ -3065,60 +3325,34 @@ class DocumentProcessor:
 
             # 7. 生成报告文件 (包含时间戳)
             report_path = None
-            if True:  # 总是生成报告供查询
+            try:
+                import pandas as pd
+                from datetime import datetime
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                report_filename = f"{base_name}_{timestamp}_Excel空值检查报告.xlsx"
+
+                # ================= 【修改】使用项目专属目录自动归档 =================
+                from utils.path_utils import get_project_report_dir
+                output_dir = get_project_report_dir()
+                report_path = os.path.join(output_dir, report_filename)
+                # ====================================================================
+
+                report_data = []
+                if final_errors:
+                    for error_msg in final_errors:
+                        report_data.append({"检查项": error_msg})
+                else:
+                    report_data.append({"检查项": "✅ 所有关键列空值检查通过"})
+                df_report = pd.DataFrame(report_data)
+                with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
+                    df_report.to_excel(writer, index=False, sheet_name="空值检查结果")
+            except Exception as e:
                 try:
-                    import pandas as pd
-                    from datetime import datetime
-
-                    # 获取项目名称 (不含路径和扩展名)
-                    base_name = os.path.splitext(os.path.basename(file_path))[0]
-
-                    # 生成时间戳
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-                    # 报告文件名: 项目名_时间戳_Excel空值检查报告.xlsx
-                    report_filename = f"{base_name}_{timestamp}_Excel空值检查报告.xlsx"
-
-                    # 使用配置中的存放位置
-                    from extend.matcher_config import MatcherConfig
-
-                    config = MatcherConfig.load()
-                    output_dir = config.get("storage", {}).get("initial_review")
-                    if output_dir:
-                        output_dir = os.path.abspath(output_dir)
-                        if not os.path.exists(output_dir):
-                            os.makedirs(output_dir, exist_ok=True)
-                    else:
-                        output_dir = "."
-
-                    report_path = os.path.join(output_dir, report_filename)
-
-                    # 生成报告数据
-                    report_data = []
-                    if final_errors:
-                        for error_msg in final_errors:
-                            report_data.append({"检查项": error_msg})
-                    else:
-                        report_data.append({"检查项": "✅ 所有关键列空值检查通过"})
-
-                    # 写入Excel
-                    df_report = pd.DataFrame(report_data)
-                    with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
-                        df_report.to_excel(
-                            writer, index=False, sheet_name="空值检查结果"
-                        )
-
-                except Exception as e:
-                    # 报告生成失败不影响主流程
-                    try:
-                        from utils.runtime_logger import RuntimeLogger
-
-                        RuntimeLogger.log(
-                            f"生成Excel空值检查报告失败: {e}", level="WARN"
-                        )
-                    except:
-                        pass
-
+                    from utils.runtime_logger import RuntimeLogger
+                    RuntimeLogger.log(f"生成Excel空值检查报告失败: {e}", level="WARN")
+                except:
+                    pass
             return {
                 "is_ok": len(final_errors) == 0,
                 "errors": final_errors,
@@ -3204,67 +3438,187 @@ class DocumentProcessor:
         except:
             return []
 
+    # @staticmethod
+    # def validate_hierarchy_matching(
+    #     word_path,
+    #     excel_path,
+    #     header_row=0,
+    #     level1_col=None,
+    #     level2_col=None,
+    #     level3_col=None,
+    #     sheet_name=None,
+    #     fuzzy_match=True,
+    #     threshold=0.8,
+    #     progress_callback=None,
+    #     word_sections_preloaded=None,
+    #     project_name=None,
+    # ):
+    #     """
+    #     节点5：层级匹配校验
+    #     使用 HierarchicalMatcher 进行 Excel 一二三级模块与 Word 标题的层级对应校验
+    #     """
+    #     try:
+    #         import pandas as pd
+    #         import os
+    #
+    #         matcher = HierarchicalMatcher(fuzzy_match=fuzzy_match, threshold=threshold)
+    #
+    #         # [FIX] 优先使用预加载的层级数据
+    #         # 层级匹配（Step 5）只需要标题结构，即使 content 为空也不应强制重新提取（会导致自动编号逻辑介入）
+    #         if word_sections_preloaded is None:
+    #             # 如果没有预加载，且提供了路径，使用稳定模式提取
+    #             if isinstance(word_path, str) and word_path:
+    #                 word_sections_preloaded = DocumentProcessor.extract_word_structure(
+    #                     word_path, use_stable=True
+    #                 )
+    #             elif hasattr(word_path, "paragraphs"):
+    #                 word_sections_preloaded = DocumentProcessor.extract_word_structure(
+    #                     word_path
+    #                 )
+    #
+    #         # 加载配置
+    #         config = MatcherConfig.load()
+    #         h_config = config.get(
+    #             "hierarchy", MatcherConfig.get_defaults()["hierarchy"]
+    #         )
+    #
+    #         # 使用配置中的列索引 (如果参数未提供，则使用配置值)
+    #         l1_c = (
+    #             level1_col if level1_col is not None else h_config.get("level1_col", 1)
+    #         )
+    #         l2_c = (
+    #             level2_col if level2_col is not None else h_config.get("level2_col", 2)
+    #         )
+    #         l3_c = (
+    #             level3_col if level3_col is not None else h_config.get("level3_col", 3)
+    #         )
+    #
+    #         # 确定要使用的工作表
+    #         target_sheet_name = sheet_name
+    #         if target_sheet_name is None:
+    #             sheet_idx = h_config.get(
+    #                 "sheet_name", 2
+    #             )  # Default to 3rd sheet (index 2)
+    #             try:
+    #                 xl = pd.ExcelFile(excel_path)
+    #                 sheet_names = xl.sheet_names
+    #                 if len(sheet_names) > sheet_idx:
+    #                     target_sheet_name = sheet_names[sheet_idx]
+    #                 elif len(sheet_names) > 0:
+    #                     target_sheet_name = sheet_names[0]
+    #             except Exception as e:
+    #                 print(f"Error checking sheets: {e}")
+    #                 target_sheet_name = 0
+    #
+    #         print(
+    #             f"[DEBUG] validate_hierarchy_matching: sheet={target_sheet_name}, l1={l1_c}, l2={l2_c}, l3={l3_c}, header={header_row}"
+    #         )
+    #
+    #         # 准备 Word 结构树日志路径
+    #         # 使用项目名
+    #         if project_name:
+    #             clean_name = ReportGenerator._clean_project_name(project_name)
+    #         elif word_sections_preloaded is not None:
+    #             clean_name = "项目报告"
+    #         else:
+    #             clean_name = ReportGenerator._clean_project_name(word_path)
+    #
+    #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #         base_name = f"{clean_name}_{timestamp}"
+    #
+    #         config = MatcherConfig.load()
+    #         output_dir = config.get("storage", {}).get("initial_review")
+    #         if output_dir:
+    #             output_dir = os.path.abspath(output_dir)
+    #             if not os.path.exists(output_dir):
+    #                 os.makedirs(output_dir, exist_ok=True)
+    #             tree_log_path = os.path.join(output_dir, f"{base_name}-Word结构树.txt")
+    #         else:
+    #             tree_log_path = os.path.join(os.getcwd(), f"{base_name}-Word结构树.txt")
+    #
+    #         report = matcher.match_hierarchical_documents(
+    #             word_path,
+    #             excel_path,
+    #             sheet_name=target_sheet_name,
+    #             level1_col=l1_c,
+    #             level2_col=l2_c,
+    #             level3_col=l3_c,
+    #             header=header_row,
+    #             progress_callback=progress_callback,
+    #             hierarchy_log_path=tree_log_path,
+    #             word_sections_preloaded=word_sections_preloaded,  # [FIX] 传递预加载数据，避免重复提取和错误处理
+    #         )
+    #
+    #         # 保存报告
+    #         report_filename = f"{base_name}-层级匹配报告.xlsx"
+    #
+    #         # 使用配置中的存放位置
+    #         output_dir = config.get("storage", {}).get("initial_review")
+    #         if output_dir:
+    #             output_dir = os.path.abspath(output_dir)
+    #             if not os.path.exists(output_dir):
+    #                 os.makedirs(output_dir, exist_ok=True)
+    #             report_path = os.path.join(output_dir, report_filename)
+    #         else:
+    #             report_path = os.path.abspath(report_filename)
+    #
+    #         saved_path = matcher.save_report(report, report_path)
+    #         report["report_path"] = os.path.abspath(saved_path)
+    #
+    #         # [NEW] 同时保存JSON报告到单独的子文件夹
+    #         json_report_dir = os.path.join(
+    #             output_dir if output_dir else os.path.dirname(report_path),
+    #             "json_reports",
+    #         )
+    #         if not os.path.exists(json_report_dir):
+    #             os.makedirs(json_report_dir, exist_ok=True)
+    #
+    #         json_report_filename = f"{base_name}-hierarchy_matching.json"
+    #         json_report_path = os.path.join(json_report_dir, json_report_filename)
+    #         try:
+    #             import json
+    #
+    #             with open(json_report_path, "w", encoding="utf-8") as f:
+    #                 json.dump(report, f, ensure_ascii=False, indent=2)
+    #             report["json_report_path"] = json_report_path
+    #             if RuntimeLogger:
+    #                 RuntimeLogger.log(
+    #                     f"✓ JSON报告已保存: {json_report_path}", level="INFO"
+    #                 )
+    #         except Exception as e:
+    #             print(f"警告: 无法保存JSON报告: {e}")
+    #
+    #         return report
+    #     except Exception as e:
+    #         print(f"层级匹配校验失败: {e}")
+    #         return {"is_valid": False, "error": str(e)}
+
     @staticmethod
     def validate_hierarchy_matching(
-        word_path,
-        excel_path,
-        header_row=0,
-        level1_col=None,
-        level2_col=None,
-        level3_col=None,
-        sheet_name=None,
-        fuzzy_match=True,
-        threshold=0.8,
-        progress_callback=None,
-        word_sections_preloaded=None,
-        project_name=None,
+            word_path, excel_path, header_row=0, level1_col=None, level2_col=None,
+            level3_col=None, sheet_name=None, fuzzy_match=True, threshold=0.8,
+            progress_callback=None, word_sections_preloaded=None, project_name=None,
     ):
-        """
-        节点5：层级匹配校验
-        使用 HierarchicalMatcher 进行 Excel 一二三级模块与 Word 标题的层级对应校验
-        """
+        """节点5：层级匹配校验"""
         try:
             import pandas as pd
             import os
-
             matcher = HierarchicalMatcher(fuzzy_match=fuzzy_match, threshold=threshold)
-
-            # [FIX] 优先使用预加载的层级数据
-            # 层级匹配（Step 5）只需要标题结构，即使 content 为空也不应强制重新提取（会导致自动编号逻辑介入）
             if word_sections_preloaded is None:
-                # 如果没有预加载，且提供了路径，使用稳定模式提取
                 if isinstance(word_path, str) and word_path:
-                    word_sections_preloaded = DocumentProcessor.extract_word_structure(
-                        word_path, use_stable=True
-                    )
+                    word_sections_preloaded = DocumentProcessor.extract_word_structure(word_path, use_stable=True)
                 elif hasattr(word_path, "paragraphs"):
-                    word_sections_preloaded = DocumentProcessor.extract_word_structure(
-                        word_path
-                    )
+                    word_sections_preloaded = DocumentProcessor.extract_word_structure(word_path)
 
-            # 加载配置
             config = MatcherConfig.load()
-            h_config = config.get(
-                "hierarchy", MatcherConfig.get_defaults()["hierarchy"]
-            )
+            h_config = config.get("hierarchy", MatcherConfig.get_defaults()["hierarchy"])
+            l1_c = level1_col if level1_col is not None else h_config.get("level1_col", 1)
+            l2_c = level2_col if level2_col is not None else h_config.get("level2_col", 2)
+            l3_c = level3_col if level3_col is not None else h_config.get("level3_col", 3)
 
-            # 使用配置中的列索引 (如果参数未提供，则使用配置值)
-            l1_c = (
-                level1_col if level1_col is not None else h_config.get("level1_col", 1)
-            )
-            l2_c = (
-                level2_col if level2_col is not None else h_config.get("level2_col", 2)
-            )
-            l3_c = (
-                level3_col if level3_col is not None else h_config.get("level3_col", 3)
-            )
-
-            # 确定要使用的工作表
             target_sheet_name = sheet_name
             if target_sheet_name is None:
-                sheet_idx = h_config.get(
-                    "sheet_name", 2
-                )  # Default to 3rd sheet (index 2)
+                sheet_idx = h_config.get("sheet_name", 2)
                 try:
                     xl = pd.ExcelFile(excel_path)
                     sheet_names = xl.sheet_names
@@ -3276,84 +3630,48 @@ class DocumentProcessor:
                     print(f"Error checking sheets: {e}")
                     target_sheet_name = 0
 
-            print(
-                f"[DEBUG] validate_hierarchy_matching: sheet={target_sheet_name}, l1={l1_c}, l2={l2_c}, l3={l3_c}, header={header_row}"
-            )
-
-            # 准备 Word 结构树日志路径
-            # 使用项目名
             if project_name:
                 clean_name = ReportGenerator._clean_project_name(project_name)
             elif word_sections_preloaded is not None:
                 clean_name = "项目报告"
             else:
                 clean_name = ReportGenerator._clean_project_name(word_path)
-
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             base_name = f"{clean_name}_{timestamp}"
 
-            config = MatcherConfig.load()
-            output_dir = config.get("storage", {}).get("initial_review")
-            if output_dir:
-                output_dir = os.path.abspath(output_dir)
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir, exist_ok=True)
-                tree_log_path = os.path.join(output_dir, f"{base_name}-Word结构树.txt")
-            else:
-                tree_log_path = os.path.join(os.getcwd(), f"{base_name}-Word结构树.txt")
+            # ================= 【修改】使用项目专属目录自动归档 =================
+            from utils.path_utils import get_project_report_dir
+            output_dir = get_project_report_dir()
+            tree_log_path = os.path.join(output_dir, f"{base_name}-Word结构树.txt")
+            # ====================================================================
 
             report = matcher.match_hierarchical_documents(
-                word_path,
-                excel_path,
-                sheet_name=target_sheet_name,
-                level1_col=l1_c,
-                level2_col=l2_c,
-                level3_col=l3_c,
-                header=header_row,
-                progress_callback=progress_callback,
-                hierarchy_log_path=tree_log_path,
-                word_sections_preloaded=word_sections_preloaded,  # [FIX] 传递预加载数据，避免重复提取和错误处理
+                word_path, excel_path, sheet_name=target_sheet_name,
+                level1_col=l1_c, level2_col=l2_c, level3_col=l3_c, header=header_row,
+                progress_callback=progress_callback, hierarchy_log_path=tree_log_path,
+                word_sections_preloaded=word_sections_preloaded,
             )
 
-            # 保存报告
             report_filename = f"{base_name}-层级匹配报告.xlsx"
-
-            # 使用配置中的存放位置
-            output_dir = config.get("storage", {}).get("initial_review")
-            if output_dir:
-                output_dir = os.path.abspath(output_dir)
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir, exist_ok=True)
-                report_path = os.path.join(output_dir, report_filename)
-            else:
-                report_path = os.path.abspath(report_filename)
-
+            report_path = os.path.join(output_dir, report_filename)
             saved_path = matcher.save_report(report, report_path)
             report["report_path"] = os.path.abspath(saved_path)
 
             # [NEW] 同时保存JSON报告到单独的子文件夹
-            json_report_dir = os.path.join(
-                output_dir if output_dir else os.path.dirname(report_path),
-                "json_reports",
-            )
+            json_report_dir = os.path.join(output_dir, "json_reports")
             if not os.path.exists(json_report_dir):
                 os.makedirs(json_report_dir, exist_ok=True)
-
             json_report_filename = f"{base_name}-hierarchy_matching.json"
             json_report_path = os.path.join(json_report_dir, json_report_filename)
             try:
                 import json
-
                 with open(json_report_path, "w", encoding="utf-8") as f:
                     json.dump(report, f, ensure_ascii=False, indent=2)
                 report["json_report_path"] = json_report_path
                 if RuntimeLogger:
-                    RuntimeLogger.log(
-                        f"✓ JSON报告已保存: {json_report_path}", level="INFO"
-                    )
+                    RuntimeLogger.log(f"✓ JSON报告已保存: {json_report_path}", level="INFO")
             except Exception as e:
                 print(f"警告: 无法保存JSON报告: {e}")
-
             return report
         except Exception as e:
             print(f"层级匹配校验失败: {e}")
@@ -3361,73 +3679,43 @@ class DocumentProcessor:
 
     @staticmethod
     def validate_functional_process(
-        word_path,
-        excel_path,
-        header_row=0,
-        func_col=None,
-        sheet_name=None,
-        fuzzy_match=True,
-        threshold=0.8,
-        progress_callback=None,
-        word_sections_preloaded=None,
-        project_name=None,
-        hierarchy_mapping=None,  # [NEW]
-        preloaded_word_data=None,  # [NEW] 预处理的Word数据
+            word_path, excel_path, header_row=0, func_col=None, sheet_name=None,
+            fuzzy_match=True, threshold=0.8, progress_callback=None,
+            word_sections_preloaded=None, project_name=None,
+            hierarchy_mapping=None, preloaded_word_data=None,
     ):
-        """
-        节点6：功能过程校验
-        使用 HierarchicalMatcher (简单模式) 校验 Excel [功能过程] 在 Word 中的匹配情况
-        支持文件路径（str）或已加载的 Document 对象作为 word_path
-        """
+        """节点6：功能过程校验"""
         try:
             from docx import Document
-
-            # 如果 word_path 是 Document 对象，使用预加载的数据
             doc = None
-            word_file_path = (
-                word_path  # [FIX] 默认保持为原始输入（可能是 Path 或 Document）
-            )
-
+            word_file_path = word_path
             if hasattr(word_path, "paragraphs") and hasattr(word_path, "element"):
-                # 这是一个 Document 对象
                 doc = word_path
-                # 如果有预载的 sections，使用它；否则重新提取
                 if word_sections_preloaded:
                     word_content = word_sections_preloaded
                 else:
                     word_content = DocumentProcessor.extract_word_structure(doc)
             else:
-                # 这是一个文件路径
                 if word_sections_preloaded:
                     word_content = word_sections_preloaded
                 else:
                     word_content = DocumentProcessor.extract_word_structure(word_path)
 
-            # 加载配置
             config = MatcherConfig.load()
             p_config = config.get("process", MatcherConfig.get_defaults()["process"])
-            h_config = config.get(
-                "hierarchy", MatcherConfig.get_defaults()["hierarchy"]
-            )
-
-            # 使用参数提供的列，否则使用配置
-            func_proc_col = (
-                func_col if func_col is not None else p_config.get("column", 6)
-            )  # 0-indexed
+            h_config = config.get("hierarchy", MatcherConfig.get_defaults()["hierarchy"])
+            func_proc_col = func_col if func_col is not None else p_config.get("column", 6)
             l1_col = h_config.get("level1_col", 1)
             l2_col = h_config.get("level2_col", 2)
             l3_col = h_config.get("level3_col", 3)
-
             matcher = HierarchicalMatcher(fuzzy_match=fuzzy_match, threshold=threshold)
 
-            # 确定要使用的工作表
             target_sheet = sheet_name
             if target_sheet is None:
                 sheet_idx = p_config.get("sheet_name", 2)
                 try:
                     xl = pd.ExcelFile(excel_path)
                     sheet_names = xl.sheet_names
-                    # Sheet selection fallback
                     if len(sheet_names) > sheet_idx:
                         target_sheet = sheet_names[sheet_idx]
                     elif len(sheet_names) > 0:
@@ -3438,112 +3726,57 @@ class DocumentProcessor:
                     print(f"Error checking excel structure: {e}")
                     target_sheet = 0
 
-            print(
-                f"[DEBUG] validate_functional_process: sheet={target_sheet}, func_col={func_proc_col}, header_row={header_row}"
-            )
-
             try:
-                # Column selection fallback
-                # Ensure we can read the header to check columns
-                # MUST pass the correct header row, otherwise index detection counts might be wrong due to merging in row 0
-                df_header = pd.read_excel(
-                    excel_path, sheet_name=target_sheet, nrows=0, header=header_row
-                )
+                df_header = pd.read_excel(excel_path, sheet_name=target_sheet, nrows=0, header=header_row)
                 if func_proc_col >= len(df_header.columns):
-                    print(
-                        f"[DEBUG] Column {func_proc_col} out of range (max {len(df_header.columns)-1}), fallback to 0"
-                    )
                     func_proc_col = 0
             except Exception as e:
-                print(f"Error checking column range: {e}")
                 pass
 
-            # === 构建预处理数据包 ===
             preloaded_data = None
             if preloaded_word_data:
-                # [优化] 检查预处理数据中是否已包含Excel数据
-                if (
-                    "excel_data" in preloaded_word_data
-                    and preloaded_word_data["excel_data"]
-                ):
-                    # 使用预处理阶段的Excel数据，避免重复读取
+                if "excel_data" in preloaded_word_data and preloaded_word_data["excel_data"]:
                     excel_data = preloaded_word_data["excel_data"]
-                    print(
-                        f"✅ 使用预处理的Excel数据: {len(excel_data)} 项 (避免重复读取)"
-                    )
                 else:
-                    # 降级: 如果预处理中没有Excel数据，则现在提取
-                    print(f"⚠️ 预处理中缺少Excel数据，现在提取...")
                     excel_data = matcher.extract_excel_content(
-                        excel_path,
-                        mode="flat",
-                        sheet_name=target_sheet,
-                        header=header_row,
-                        column=func_proc_col,
-                        level1_col=l1_col,
-                        level2_col=l2_col,
-                        level3_col=l3_col,
+                        excel_path, mode="flat", sheet_name=target_sheet, header=header_row,
+                        column=func_proc_col, level1_col=l1_col, level2_col=l2_col, level3_col=l3_col,
                     )
-
                 preloaded_data = {
-                    "items": preloaded_word_data["items"],
-                    "excel_data": excel_data,
+                    "items": preloaded_word_data["items"], "excel_data": excel_data,
                     "exact_lookup": preloaded_word_data["exact_lookup"],
                     "toc_items": preloaded_word_data["toc_items"],
                     "chapter_buckets": preloaded_word_data["chapter_buckets"],
-                    "full_text_content": preloaded_word_data.get(
-                        "full_text_content", []
-                    ),  # 【NEW】全文内容
+                    "full_text_content": preloaded_word_data.get("full_text_content", []),
                 }
-                print(
-                    f"🚀 使用预处理数据: Word={len(preloaded_data['items'])} 项, Excel={len(excel_data)} 项, "
-                    f"全文={len(preloaded_data.get('full_text_content', []))} 项"
-                )
 
             report = matcher.match_documents(
-                word_file_path,
-                excel_path,
-                sheet_name=target_sheet,
-                header=header_row,
-                column=func_proc_col,
-                level1_col=l1_col,
-                level2_col=l2_col,
-                level3_col=l3_col,
-                hierarchy_mapping=hierarchy_mapping,  # [NEW]
-                full_text_search=True,  # 功能过程通常在正文中
+                word_file_path, excel_path, sheet_name=target_sheet, header=header_row,
+                column=func_proc_col, level1_col=l1_col, level2_col=l2_col, level3_col=l3_col,
+                hierarchy_mapping=hierarchy_mapping, full_text_search=True,
                 progress_callback=progress_callback,
-                word_items_preloaded=(
-                    word_content if isinstance(word_content, list) else None
-                ),
-                preloaded_data=preloaded_data,  # [NEW] 预处理数据
+                word_items_preloaded=(word_content if isinstance(word_content, list) else None),
+                preloaded_data=preloaded_data,
             )
 
-            # 保存报告
             if project_name:
                 clean_name = ReportGenerator._clean_project_name(project_name)
             elif doc is not None or (hasattr(word_path, "paragraphs")):
-                # 如果是 Document 对象，生成一个默认名称
                 clean_name = "word_document"
             else:
                 clean_name = ReportGenerator._clean_project_name(word_path)
-
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             base_name = f"{clean_name}_{timestamp}"
             report_filename = f"{base_name}-功能过程报告.xlsx"
 
-            # 使用配置中的存放位置
-            output_dir = config.get("storage", {}).get("initial_review")
-            if output_dir:
-                output_dir = os.path.abspath(output_dir)
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir, exist_ok=True)
-                report_path = os.path.join(output_dir, report_filename)
-            else:
-                report_path = os.path.abspath(report_filename)
+            # ================= 【修改】使用项目专属目录自动归档 =================
+            from utils.path_utils import get_project_report_dir
+            output_dir = get_project_report_dir()
+            report_path = os.path.join(output_dir, report_filename)
+            # ====================================================================
 
             saved_path = matcher.save_report(report, report_path)
             report["report_path"] = os.path.abspath(saved_path)
-
             return report
         except Exception as e:
             print(f"功能过程校验失败: {e}")
@@ -3551,192 +3784,104 @@ class DocumentProcessor:
 
     @staticmethod
     def validate_data_movement_types(
-        excel_path,
-        sheet_name=None,
-        header_row=0,
-        func_col=6,
-        move_col=8,
-        progress_callback=None,
-        project_name=None,
+            excel_path, sheet_name=None, header_row=0, func_col=6, move_col=8,
+            progress_callback=None, project_name=None,
     ):
-        """
-        节点7：功能过程数据移动类型校验
-        核对一个完整功能过程以"E"开头，"W"或者"X"结束。
-        """
+        """节点7：功能过程数据移动类型校验"""
         try:
-            # 读取 Excel 数据 (使用 header=header_row)
             df = pd.read_excel(excel_path, sheet_name=sheet_name, header=header_row)
-
-            # 填充 功能过程 列，以便按功能过程分组
-            # 注意：如果列索引超出范围，返回错误
             if func_col >= len(df.columns) or move_col >= len(df.columns):
-                return {
-                    "is_valid": False,
-                    "error": f"Excel 列索引越界: func_col={func_col}, move_col={move_col}, total_cols={len(df.columns)}",
-                }
-
-            # 拷贝一份避免修改原始 df (虽然 pd.read_excel 返回的是新对象)
+                return {"is_valid": False, "error": f"Excel 列索引越界"}
             df_process = df.copy()
-            # 对功能过程列进行前向填充
             df_process.iloc[:, func_col] = df_process.iloc[:, func_col].ffill()
-
             results = []
             current_process = None
             current_moves = []
             process_rows = []
 
             def check_moves(moves):
-                if not moves:
-                    return "无数据移动"
-
-                # 提取有效的 E, R, W, X
-                valid_moves = [
-                    str(m).strip().upper()
-                    for m in moves
-                    if str(m).strip().upper() in ["E", "R", "W", "X"]
-                ]
-                if not valid_moves:
-                    return "缺少有效类型"
-
+                if not moves: return "无数据移动"
+                valid_moves = [str(m).strip().upper() for m in moves if str(m).strip().upper() in ["E", "R", "W", "X"]]
+                if not valid_moves: return "缺少有效类型"
                 start_e = valid_moves[0] == "E"
                 end_wx = valid_moves[-1] in ["W", "X"]
-
-                if start_e and end_wx:
-                    return "合规"
-
-                if not start_e:
-                    return "缺少E"
-                if not end_wx:
-                    return "缺少X"
-
+                if start_e and end_wx: return "合规"
+                if not start_e: return "缺少E"
+                if not end_wx: return "缺少X"
                 return "不合规"
 
-            # 遍历数据
             for idx, row in df_process.iterrows():
                 proc_val = str(row.iloc[func_col]).strip()
                 move_val = str(row.iloc[move_col]).strip()
-
-                # 过滤说明性文字或空行 (与 HierarchicalMatcher.IGNORE_PATTERNS 逻辑保持一致)
-                if (
-                    not proc_val
-                    or proc_val.lower() == "nan"
-                    or "体现了" in proc_val
-                    or "功能过程" in proc_val
-                ):
+                if not proc_val or proc_val.lower() == "nan" or "体现了" in proc_val or "功能过程" in proc_val:
                     continue
-
                 if current_process != proc_val:
-                    # 如果之前有处理，则结算上一个
                     if current_process:
                         check_res = check_moves(current_moves)
-                        results.append(
-                            {
-                                "process": current_process,
-                                "moves": "".join(current_moves),
-                                "result": check_res,
-                                "row_range": (
-                                    f"{process_rows[0]+header_row+2}-{process_rows[-1]+header_row+2}"
-                                    if len(process_rows) > 1
-                                    else f"{process_rows[0]+header_row+2}"
-                                ),
-                            }
-                        )
-
+                        results.append({
+                            "process": current_process, "moves": "".join(current_moves), "result": check_res,
+                            "row_range": (
+                                f"{process_rows[0] + header_row + 2}-{process_rows[-1] + header_row + 2}" if len(
+                                    process_rows) > 1 else f"{process_rows[0] + header_row + 2}"),
+                        })
                     current_process = proc_val
                     current_moves = []
                     process_rows = []
-
-                # 记录该行的数据移动类型（只要在有效列表中）
                 m_upper = move_val.upper()
                 if m_upper in ["E", "R", "W", "X"]:
                     current_moves.append(m_upper)
-
                 process_rows.append(idx)
 
-            # 结算最后一个
             if current_process:
                 check_res = check_moves(current_moves)
-                results.append(
-                    {
-                        "process": current_process,
-                        "moves": "".join(current_moves),
-                        "result": check_res,
-                        "row_range": (
-                            f"{process_rows[0]+header_row+2}-{process_rows[-1]+header_row+2}"
-                            if len(process_rows) > 1
-                            else f"{process_rows[0]+header_row+2}"
-                        ),
-                    }
-                )
+                results.append({
+                    "process": current_process, "moves": "".join(current_moves), "result": check_res,
+                    "row_range": (f"{process_rows[0] + header_row + 2}-{process_rows[-1] + header_row + 2}" if len(
+                        process_rows) > 1 else f"{process_rows[0] + header_row + 2}"),
+                })
 
-            # 统计
             passed = sum(1 for r in results if r["result"] == "合规")
             failed = len(results) - passed
-
-            # 保存报表
             report_path = None
+
             if len(results) > 0:
                 try:
                     df_res = pd.DataFrame(results)
-                    # 重写列名
                     df_res = df_res.rename(
-                        columns={
-                            "process": "功能过程",
-                            "moves": "移动类型序列",
-                            "result": "校验结果",
-                            "row_range": "Excel行号",
-                        }
-                    )
-                    # 确定文件名
+                        columns={"process": "功能过程", "moves": "移动类型序列", "result": "校验结果",
+                                 "row_range": "Excel行号"})
+
                     if project_name:
                         clean_name = ReportGenerator._clean_project_name(project_name)
                     else:
                         clean_name = ReportGenerator._clean_project_name(excel_path)
-
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     base_name = f"{clean_name}_{timestamp}"
                     report_filename = f"{base_name}-数据移动类型报告.xlsx"
 
-                    # 使用配置中的存放位置
-                    config = MatcherConfig.load()
-                    output_dir = config.get("storage", {}).get("initial_review")
-                    if output_dir:
-                        output_dir = os.path.abspath(output_dir)
-                        if not os.path.exists(output_dir):
-                            os.makedirs(output_dir, exist_ok=True)
-                        report_path = os.path.join(output_dir, report_filename)
-                    else:
-                        report_path = os.path.abspath(report_filename)
+                    # ================= 【修改】使用项目专属目录自动归档 =================
+                    from utils.path_utils import get_project_report_dir
+                    output_dir = get_project_report_dir()
+                    report_path = os.path.join(output_dir, report_filename)
 
                     # 处理重名
                     counter = 1
                     while os.path.exists(report_path):
-                        if output_dir:
-                            report_path = os.path.join(
-                                output_dir,
-                                f"{base_name}-数据移动类型报告({counter}).xlsx",
-                            )
-                        else:
-                            report_path = os.path.abspath(
-                                f"{base_name}-数据移动类型报告({counter}).xlsx"
-                            )
+                        report_path = os.path.join(output_dir, f"{base_name}-数据移动类型报告({counter}).xlsx")
                         counter += 1
+                    # ====================================================================
 
                     df_res.to_excel(report_path, index=False)
                     report_path = os.path.abspath(report_path)
                 except Exception as e:
                     print(f"Error saving data movement report: {e}")
-
             return {
-                "is_valid": failed == 0,
-                "items": results,
+                "is_valid": failed == 0, "items": results,
                 "statistics": {"总数": len(results), "合规": passed, "不合规": failed},
                 "report_path": report_path,
             }
-
         except Exception as e:
             import traceback
-
             print(f"数据移动类型校验失败: {e}")
             print(traceback.format_exc())
             return {"is_valid": False, "error": str(e)}

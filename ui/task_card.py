@@ -26,6 +26,8 @@ from .report_dialog import ReportDialog, SummaryDialog
 from utils.document_processor import DocumentProcessor
 from utils.similarity_checker import SimilarityChecker
 from utils.report_generator import ReportGenerator
+from utils.asset_matcher import compare_split_with_asset
+from utils.data_attribute_checker import check_data_attribute_duplicates
 from utils.path_utils import get_resource_path, clean_project_name, open_directory
 from utils.runtime_logger import RuntimeLogger
 from extend.matcher_config import MatcherConfig
@@ -49,18 +51,24 @@ class ValidationWorker(QThread):
         self._is_running = False
 
     def run(self):
+        # ================= 【新增】读取并应用用户设置的日志级别 =================
+        from extend.matcher_config import MatcherConfig
+        config = MatcherConfig.load()
+        log_level = config.get("log_level", "INFO")
+        RuntimeLogger.set_log_level(log_level)
+        # 【调试】打印当前日志级别
+        print(f"[DEBUG] 从配置读取的日志级别: {log_level}")
+        print(f"[DEBUG] RuntimeLogger._log_level: {RuntimeLogger._log_level}")
+        # ======================================================================
         # 设置项目名称用于日志
         project_name = self.task_data.get("filename", "UnknownProject")
         RuntimeLogger.set_project(project_name)
-
         RuntimeLogger.log(f"开始后台校验任务...")
         try:
             # 清理之前的缓存，确保使用的是当前任务的文件
             DocumentProcessor.clear_cache()
-
             # 优化初始进度显示，从很小的值开始
             self.progress.emit(1, "正在初始化校验环境...")
-
             raw_info = self.task_data.get("raw_task_info", {})
             file_pairs = raw_info.get("file_pairs", [])
             RuntimeLogger.log(f"获取到文件配对数量: {len(file_pairs)}")
@@ -70,52 +78,56 @@ class ValidationWorker(QThread):
                 )
                 self.finished.emit({})
                 return
-
+            # ================= 【新增】读取自动编号配置 =================
+            auto_numbering = raw_info.get("auto_numbering", False)
+            # ============================================================
             # 1. 启动并行加载架构 (核心加速点：多线程并发解析)
             import concurrent.futures
-
             pair = file_pairs[0]
             template_path = get_resource_path("folder/附件1XX项目需求说明书V1.0.0.docx")
-
             RuntimeLogger.log(
                 f"🚀 [Step 0] 环境准备 - 启动并行架构，Word文档处理前置到此阶段完成..."
             )
             self.progress.emit(2, "正在并发加载 Word/Excel 文件...")
-
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                # 定义三个核心预加载任务
-                future_tpl = executor.submit(
-                    DocumentProcessor.load_word_document, template_path
-                )
-                future_target = executor.submit(
-                    DocumentProcessor.load_word_document, pair["word"]
-                )
-                future_wb = executor.submit(
+                # 定义核心预加载任务（根据文件存在情况动态决定）
+                futures = {}
+                # 始终加载模板（如果存在）
+                if template_path and os.path.exists(template_path):
+                    futures['tpl'] = executor.submit(
+                        DocumentProcessor.load_word_document, template_path
+                    )
+                # 只在有Word文档时才加载
+                if pair.get("word") and os.path.exists(pair["word"]):
+                    futures['target'] = executor.submit(
+                        DocumentProcessor.load_word_document, pair["word"]
+                    )
+                # 始终加载Excel
+                futures['wb'] = executor.submit(
                     DocumentProcessor.load_excel_workbook, pair["excel"], True
                 )
-                future_excel_info = executor.submit(
+                futures['excel_info'] = executor.submit(
                     DocumentProcessor.extract_excel_info, pair["excel"]
                 )
-
                 # 等待加载基础对象
-                tpl_doc = future_tpl.result()
-                target_doc = future_target.result()
-                target_wb = future_wb.result()
-
+                tpl_doc = futures.get('tpl', None)
+                if tpl_doc:
+                    tpl_doc = tpl_doc.result()
+                target_doc = futures.get('target', None)
+                if target_doc:
+                    target_doc = target_doc.result()
+                target_wb = futures['wb'].result()
                 self.progress.emit(8, "正在提取文档深层结构 (目录/层级)...")
-
                 # === 新增：数据预处理阶段 ===
                 # 为功能过程匹配预处理数据，避免在Step 6时重复读取
                 run_simple = raw_info.get("run_simple", False)
                 word_preprocessing_success = False  # [FIX] 标记预处理是否成功
-
                 # [核心优化] 将Word文档打开和大纲提取完全移到Step 0中完成
                 if run_simple and pair["word"] and pair["excel"]:
                     RuntimeLogger.log(
                         f"🔄 [Step 0.5] 开始预处理Word和Excel数据以优化后续匹配..."
                     )
                     self.progress.emit(10, "Word文档打开与大纲提取...")
-
                     try:
                         # [关键改进] 使用word_outline_extractor直接提取完整大纲（1170项）
                         # 而不是prepare_word_data_async（只获取4项）
@@ -126,33 +138,29 @@ class ValidationWorker(QThread):
                         RuntimeLogger.log(
                             f"  [INFO] 🚀 [Step 0] 开始完整Word大纲及内容预处理..."
                         )
-
                         if pair["word"] and os.path.exists(pair["word"]):
                             try:
                                 # [FIX] 使用 HierarchicalMatcher.prepare_word_data_async
                                 # 它会使用 win32 稳定提取大纲并在后台读取全文正文
                                 matcher = HierarchicalMatcher()
-
                                 word_prep_progress(
                                     10, "正在启动 Word 结构及全文预提取..."
                                 )
-
                                 # 执行完整预处理（包含大纲、全文、Excel内容）
+                                # ================= 【修改】传递 auto_numbering 参数 =================
                                 word_cache = matcher.prepare_word_data_async(
-                                    pair["word"]
+                                    pair["word"], auto_numbering=auto_numbering
                                 )
-
+                                # ============================================================
                                 if word_cache and word_cache.get("items"):
                                     word_items = word_cache["items"]
                                     full_text_content = word_cache.get(
                                         "full_text_content", []
                                     )
-
                                     word_prep_progress(
                                         60,
                                         f"已提取 {len(word_items)} 个章节，正在集成数据...",
                                     )
-
                                     # [NEW] 提前在Step 0.5提取Excel内容，确保一致性
                                     word_prep_progress(
                                         70, "正在预加载 Excel 功能点数据..."
@@ -168,7 +176,6 @@ class ValidationWorker(QThread):
                                         excel_col = excel_config.get(
                                             "functional_column_index", 6
                                         )
-
                                         excel_data = matcher.extract_excel_content(
                                             pair["excel"],
                                             mode="flat",
@@ -189,11 +196,9 @@ class ValidationWorker(QThread):
                                             level="WARN",
                                         )
                                         word_cache["excel_data"] = None
-
                                     if not hasattr(self, "data_cache"):
                                         self.data_cache = {}
                                     self.data_cache["word_data"] = word_cache
-
                                     word_prep_progress(
                                         100,
                                         f"完成: {len(word_items)} 项已缓存，包含全文内容",
@@ -206,7 +211,6 @@ class ValidationWorker(QThread):
                                     RuntimeLogger.log(
                                         f"⚠️ Word预处理返回空结果", level="WARN"
                                     )
-
                             except Exception as e:
                                 RuntimeLogger.log(
                                     f"⚠️ Word数据预处理异常: {str(e)[:150]}",
@@ -214,30 +218,23 @@ class ValidationWorker(QThread):
                                 )
                         else:
                             RuntimeLogger.log(f"⚠️ Word文件不存在", level="WARN")
-
                     except Exception as e:
                         RuntimeLogger.log(f"⚠️ Word数据预处理异常: {e}")
                         RuntimeLogger.log(f"  [INFO] 将使用标准Word处理流程")
-
                 self.progress.emit(22, "正在继续提取文档结构...")
-
                 # 开始并发提取详细结构 (利用已加载的对象)
                 # 【优先使用稳定提取】使用 HierarchicalMatcher 替代 DocumentProcessor
-
                 # [优化] 只有在需要 Word 相关内容时才执行昂贵的结构提取
                 run_template = raw_info.get("run_template", True)
                 run_factors = raw_info.get("run_factors", True)
                 run_hierarchy = raw_info.get("run_hierarchy", True)
-
                 need_target_structure = any(
                     [run_template, run_factors, run_hierarchy, run_simple]
                 )
                 # 只有 Step 1 模板校验真正需要解析模板文档结构
                 need_tpl_structure = run_template
-
                 template_sections = []
                 target_sections = []
-
                 # [DEBUG] 调试标志状态
                 RuntimeLogger.log(
                     f"[DEBUG] word_preprocessing_success={word_preprocessing_success}, need_target_structure={need_target_structure}"
@@ -245,13 +242,11 @@ class ValidationWorker(QThread):
                 RuntimeLogger.log(
                     f"[DEBUG] run_template={run_template}, run_factors={run_factors}, run_hierarchy={run_hierarchy}, run_simple={run_simple}"
                 )
-
                 # [FIX] 如果Word预处理已成功，则跳过重复的Word结构提取
                 if need_target_structure and not word_preprocessing_success:
                     RuntimeLogger.log(
                         f"🔎 [Step 0] 正在预提取 Word 目录树... (优先使用稳定大纲提取)"
                     )
-
                     matcher = HierarchicalMatcher()
 
                     # 修改为接受路径 and 对象，优先使用 COM 接口（获取准确编号 and 过滤正文）
@@ -267,17 +262,17 @@ class ValidationWorker(QThread):
                             # ===== 核心方案：使用 HierarchicalMatcher 提供的稳健提取 =====
                             if path and os.path.exists(path):
                                 RuntimeLogger.log(
-                                    f"  [INFO] 🌟 使用 HierarchicalMatcher 提取内容结构: {os.path.basename(path)}"
+                                    f"  [INFO] 🌟 使用 HierarchicalMatcher 提取标题结构: {os.path.basename(path)}"
                                 )
                                 extraction_progress_proxy(
-                                    0, "正在通过 Win32 接口提取 Word 结构及内容..."
+                                    0, "正在通过 Win32 接口提取 Word 标题结构..."
                                 )
-
                                 matcher = HierarchicalMatcher()
+                                # ================= 【修改】传递 auto_numbering 参数 =================
                                 result = matcher.extract_word_outline_as_hierarchy(
-                                    path, include_content=True
+                                    path, include_content=False, auto_numbering=auto_numbering
                                 )
-
+                                # ============================================================
                                 if result:
                                     # [FIX] extract_word_outline_as_hierarchy 返回的是字典，需要提取 all_items 列表
                                     items = (
@@ -287,10 +282,9 @@ class ValidationWorker(QThread):
                                     )
                                     extraction_progress_proxy(100, "Word 结构提取完成")
                                     RuntimeLogger.log(
-                                        f"  [OK] ✅ 内容结构提取成功: {len(items)} 项 (含正文内容)"
+                                        f"  [OK] ✅ 标题结构提取成功: {len(items)} 项"
                                     )
                                     return items
-
                             # ===== 降级方案 A：DocumentProcessor 稳定模式 =====
                             RuntimeLogger.log(
                                 f"  [WARN] ⚠️ 降级使用 DocumentProcessor.extract_word_structure(use_stable=True)..."
@@ -305,7 +299,6 @@ class ValidationWorker(QThread):
                                     f"  [OK] DocumentProcessor 提取成功: {len(result)} 项"
                                 )
                                 return result
-
                             # ===== 降级方案 B：HierarchicalMatcher 从 docx 对象提取 =====
                             RuntimeLogger.log(
                                 f"  [WARN] ⚠️ 降级使用 HierarchicalMatcher.extract_outline_from_docx_object..."
@@ -316,18 +309,14 @@ class ValidationWorker(QThread):
                                     f"  [OK] HierarchicalMatcher 提取成功: {len(result['all_items'])} 项"
                                 )
                                 return result["all_items"]
-
                             raise Exception("无法通过任何方式提取文档结构")
-
                         except Exception as e:
                             import traceback
-
                             RuntimeLogger.log(
                                 f"[ERROR] extract_word_hierarchy 异常: {e}",
                                 level="ERROR",
                             )
                             RuntimeLogger.log(traceback.format_exc(), level="DEBUG")
-
                             # ===== 最终兜底方案 =====
                             RuntimeLogger.log(
                                 f"[WARN] 🛟 最终降级: DocumentProcessor.extract_word_structure(无 use_stable)..."
@@ -347,36 +336,33 @@ class ValidationWorker(QThread):
                                 return []
 
                     # 并发执行
-                    futures = {}
+                    structure_futures = {}
                     if need_tpl_structure:
-                        futures["tpl"] = executor.submit(
+                        structure_futures["tpl"] = executor.submit(
                             extract_word_hierarchy, template_path, tpl_doc
                         )
-
-                    futures["target"] = executor.submit(
-                        extract_word_hierarchy, pair["word"], target_doc
-                    )
-
-                    excel_info = future_excel_info.result()  # 已有缓存
-
-                    if "tpl" in futures:
-                        template_sections = futures["tpl"].result()
-
-                    target_sections = futures["target"].result()
-
+                        # 只在有Word文档时才提交提取任务
+                        if pair.get("word") and os.path.exists(pair["word"]):
+                            structure_futures["target"] = executor.submit(
+                                extract_word_hierarchy, pair["word"], target_doc
+                            )
+                        excel_info = futures['excel_info'].result()  # 已有缓存 (此时读取的是外层的 futures)
+                        if "tpl" in structure_futures:
+                            template_sections = structure_futures["tpl"].result()
+                        if "target" in structure_futures:
+                            target_sections = structure_futures["target"].result()
                     RuntimeLogger.log(
                         f"✅ [Step 0] 预提取完成，共获取 {len(target_sections)} 个章节/内容项"
                     )
                 elif word_preprocessing_success:
                     # [FIX] 如果Word预处理成功，直接使用预处理的数据，跳过重复提取
-                    RuntimeLogger.log("🔎 [Step 0] 使用预处理的Word数据，跳过重复提取")
-                    excel_info = future_excel_info.result()
+                    RuntimeLogger.log(" [Step 0] 使用预处理的Word数据，跳过重复提取")
+                    excel_info = futures['excel_info'].result()
                     target_sections = (
                         getattr(self, "data_cache", {})
                         .get("word_data", {})
                         .get("items", [])
                     )
-
                     # [FIX] 即使已预处理目标文档，如果需要模板校验，也必须确保 template_sections 被加载
                     if need_tpl_structure and not template_sections:
                         RuntimeLogger.log(
@@ -384,9 +370,11 @@ class ValidationWorker(QThread):
                         )
                         try:
                             matcher = HierarchicalMatcher()
+                            # ================= 【修改】传递 auto_numbering 参数 =================
                             tpl_res = matcher.extract_word_outline_as_hierarchy(
-                                template_path, include_content=True
+                                template_path, include_content=True, auto_numbering=auto_numbering
                             )
+                            # ============================================================
                             template_sections = tpl_res.get("all_items", [])
                             RuntimeLogger.log(
                                 f"✅ [Step 0] 模板结构加载完成: {len(template_sections)} 项"
@@ -395,19 +383,19 @@ class ValidationWorker(QThread):
                             RuntimeLogger.log(
                                 f"⚠️ [Step 0] 模板结构加载失败: {e}", level="WARN"
                             )
-
                     RuntimeLogger.log(
                         f"✅ [Step 0] 使用缓存数据: {len(target_sections)} 个章节/内容项"
                     )
                 else:
                     RuntimeLogger.log(
-                        "🔎 [Step 0] 跳过 Word 结构提取 (未选择任何 Word 校验节点)"
+                        " [Step 0] 跳过 Word 结构提取 (未选择任何 Word 校验节点)"
                     )
-                    excel_info = future_excel_info.result()
-
+                    excel_info = futures['excel_info'].result()
             if not tpl_doc and need_tpl_structure:
                 RuntimeLogger.log("⚠️ 模板文件加载失败", level="WARN")
-            if not target_doc and need_target_structure:
+            # 只有需要Word相关校验时才检查Word文件是否存在
+            has_word = pair.get("word") is not None and os.path.exists(pair["word"])
+            if not target_doc and need_target_structure and has_word:
                 RuntimeLogger.log("❌ 目标 Word 加载失败", level="ERROR")
                 self.finished.emit({"error": "无法加载 Word 文件"})
                 return
@@ -415,20 +403,16 @@ class ValidationWorker(QThread):
                 RuntimeLogger.log("❌ 目标 Excel 加载失败", level="ERROR")
                 self.finished.emit({"error": "无法加载 Excel 文件"})
                 return
-
             self.progress.emit(15, "正在扫描 Excel 工作表列表...")
             RuntimeLogger.log(
                 f"✅ [Step 0] 基础对象并发解析完成 (目标项: {len(target_sections)})"
             )
-
             if not self._is_running:
                 return
-
             # [NEW] 提交 Step 0 结果
             self.step_result.emit(
                 0, {"env_check": {"is_ok": True, "sections": len(target_sections)}}
             )
-
             v_res = {}  # 保证 v_res 始终存在
             self.progress.emit(15, "正在扫描 Excel 工作表列表...")
             # 自动识别要比对的工作表
@@ -437,26 +421,29 @@ class ValidationWorker(QThread):
                 if raw_info.get("run_hierarchy")
                 else raw_info.get("simple_sheet")
             )
-
             # 4. 节点 1：模板合规性校验
             step1_start = time.time()
             if raw_info.get("run_template", True):
-                RuntimeLogger.log(f"正在启动 [Step 1] 模板合规性比对校验...")
-                self.progress.emit(20, "正在比对 Word 章节与标准模板...")
-                res_s1 = SimilarityChecker.validate_template(
-                    target_sections, excel_info, template_sections
-                )
-                v_res.update(res_s1)
+                # 检查是否有Word文档支持
+                has_word = pair.get("word") and os.path.exists(pair["word"])
+                if has_word and target_sections:
+                    RuntimeLogger.log(f"正在启动 [Step 1] 模板合规性比对校验...")
+                    self.progress.emit(20, "正在比对 Word 章节与标准模板...")
+                    res_s1 = SimilarityChecker.validate_template(
+                        target_sections, excel_info, template_sections
+                    )
+                    v_res.update(res_s1)
+                else:
+                    RuntimeLogger.log(f"[Step 1] 跳过模板校验：未上传Word文档")
+                    v_res.update({"is_valid": True, "skipped": True, "reason": "未上传Word文档"})
             else:
                 v_res.update({"is_valid": True, "skipped": True})
-
             if not self._is_running:
                 return
             v_res["duration"] = time.time() - step1_start
             self.step_result.emit(1, v_res)
             # [UI 对齐] 立即跃迁至第 2 步起始进度 (30%)
             self.progress.emit(30, "正在准备 Excel 空值扫描...")
-
             # 5. 节点 2：Excel 空值校验
             step2_start = time.time()
             if raw_info.get("run_empty", True):
@@ -470,17 +457,15 @@ class ValidationWorker(QThread):
                 v_res["excel_check"] = excel_check_res
             else:
                 v_res["excel_check"] = {"is_ok": True, "skipped": True}
-
             if not self._is_running:
                 return
             v_res["excel_check"]["duration"] = time.time() - step2_start
             self.step_result.emit(2, {"excel_check": v_res["excel_check"]})
             # [UI 对齐] 立即跃迁至第 3 步起始进度 (33%)
             self.progress.emit(33, "正在准备送审比例计算...")
-
             # 6. 功能匹配校验 (辅助数据)
             if target_sections and (
-                raw_info.get("run_hierarchy") or raw_info.get("run_simple")
+                    raw_info.get("run_hierarchy") or raw_info.get("run_simple")
             ):
                 RuntimeLogger.log(
                     f"正在进行 [辅助步骤] Word 与 Excel 模块名称匹配度计算..."
@@ -495,7 +480,6 @@ class ValidationWorker(QThread):
                 v_res["func_match"] = func_match
             else:
                 v_res["func_match"] = {"skipped": True}
-
             # 7. 节点 3：送审比例校验
             step3_start = time.time()
             if raw_info.get("run_ratio", True):
@@ -520,43 +504,44 @@ class ValidationWorker(QThread):
                 }
             else:
                 v_res["ratio_check"] = {"is_ok": True, "skipped": True}
-
             if not self._is_running:
                 return
             v_res["ratio_check"]["duration"] = time.time() - step3_start
             self.step_result.emit(3, {"ratio_check": v_res["ratio_check"]})
             # [UI 对齐] 立即跃迁至第 4 步起始进度 (36%)
             self.progress.emit(36, "正在准备附加值调整因子提取...")
-
             # 8. 节点 4：附加值调整因子校验
             step4_start = time.time()
             if raw_info.get("run_factors", True):
-                RuntimeLogger.log(f"正在进行 [Step 4] Word 附加值调整因子提取...")
-                self.progress.emit(37, "正在扫描文档中的因子表与描述文字...")
-                # [NEW] 传入已预提取好的 target_sections 以便进行范围限定扫描
-                factors = DocumentProcessor.check_adjustment_factors_in_word(
-                    target_doc, target_sections=target_sections
-                )
-                v_res["factor_check"] = factors
+                # 检查是否有Word文档支持
+                has_word = pair.get("word") and os.path.exists(pair["word"])
+                if has_word and target_doc:
+                    RuntimeLogger.log(f"正在进行 [Step 4] Word 附加值调整因子提取...")
+                    self.progress.emit(37, "正在扫描文档中的因子表与描述文字...")
+                    # [NEW] 传入已预提取好的 target_sections 以便进行范围限定扫描
+                    factors = DocumentProcessor.check_adjustment_factors_in_word(
+                        target_doc, target_sections=target_sections
+                    )
+                    v_res["factor_check"] = factors
+                else:
+                    RuntimeLogger.log(f"[Step 4] 跳过附加值因子：未上传Word文档")
+                    v_res["factor_check"] = {"skipped": True, "reason": "未上传Word文档"}
             else:
                 v_res["factor_check"] = {"skipped": True}
-
             if not self._is_running:
                 return
             v_res["factor_check"]["duration"] = time.time() - step4_start
             self.step_result.emit(4, {"factor_check": v_res["factor_check"]})
             # [UI 对齐] 立即跃迁至第 5 步起始进度 (39%)
             self.progress.emit(39, "正在启动核心层级匹配引擎...")
-
-            # 9. 层级匹配校验 (Node 5)
+            # 9. 层级匹配校验 (Node 5) - 需要Word文件
             step5_start = time.time()
             run_hierarchy = raw_info.get("run_hierarchy", True)
             fuzzy = raw_info.get("fuzzy", True)
             threshold = raw_info.get("threshold", 0.8)
-
+            has_word = pair.get("word") is not None and os.path.exists(pair["word"])
             hierarchy_mapping = None  # [NEW]
-
-            if run_hierarchy:
+            if run_hierarchy and has_word:
                 RuntimeLogger.log(f"正在启动 [Step 5] 核心层级匹配校验...")
 
                 def hierarchy_progress_proxy(p, msg):
@@ -566,13 +551,13 @@ class ValidationWorker(QThread):
                     mapped_progress = 39 + int(p * 0.31)
                     self.progress.emit(mapped_progress, f"层级匹配: {msg}")
                     if msg and (
-                        "开始" in msg
-                        or "完成" in msg
-                        or "1/" in msg
-                        or "/100" in msg
-                        or "[PROCESS]" in msg
-                        or "阶段" in msg
-                        or "匹配" in msg
+                            "开始" in msg
+                            or "完成" in msg
+                            or "1/" in msg
+                            or "/100" in msg
+                            or "[PROCESS]" in msg
+                            or "阶段" in msg
+                            or "匹配" in msg
                     ):
                         RuntimeLogger.log(f"[Step 5] {msg}")
 
@@ -581,13 +566,12 @@ class ValidationWorker(QThread):
                 l2_col = raw_info.get("level2_column_index", 2)
                 l3_col = raw_info.get("level3_column_index", 3)
                 hier_sheet = raw_info.get("hierarchy_sheet")
-
                 hierarchy_res = DocumentProcessor.validate_hierarchy_matching(
                     pair[
                         "word"
                     ],  # [FIX] 传递路径而不是 Document 对象，避免 os.path.basename 失败
                     pair["excel"],
-                    header_row=h_header_row,
+                    header_row=h_header_row - 1,
                     level1_col=l1_col,
                     level2_col=l2_col,
                     level3_col=l3_col,
@@ -599,7 +583,6 @@ class ValidationWorker(QThread):
                     project_name=self.task_data["filename"],
                 )
                 v_res["hierarchy_res"] = hierarchy_res
-
                 # [Optimization] 提取层级映射结果用于辅助功能过程匹配
                 try:
                     hierarchy_mapping = {}
@@ -613,40 +596,35 @@ class ValidationWorker(QThread):
                         e_l2 = str(item.get("Excel二级模块", "")).strip()
                         e_l3 = str(item.get("Excel三级模块", "")).strip()
                         key = (e_l1, e_l2, e_l3)
-
                         # 寻找 Word 匹配项 (优先使用三级标题，其次二级，其次一级)
                         w_title = (
-                            item.get("Word三级标题")
-                            or item.get("Word二级标题")
-                            or item.get("Word一级标题")
+                                item.get("Word三级标题")
+                                or item.get("Word二级标题")
+                                or item.get("Word一级标题")
                         )
                         if w_title:
                             hierarchy_mapping[key] = w_title
-
                     RuntimeLogger.log(
                         f"已成功提取 {len(hierarchy_mapping)} 个层级映射锚点用于加速后续匹配"
                     )
                 except Exception as e:
                     RuntimeLogger.log(f"提取层级映射失败: {e}", level="WARN")
-
                 RuntimeLogger.log(
                     f"层级匹配完成: {hierarchy_res.get('statistics', {})}"
                 )
             else:
                 v_res["hierarchy_res"] = {"is_valid": True, "skipped": True}
-
             if not self._is_running:
                 return
             v_res["hierarchy_res"]["duration"] = time.time() - step5_start
             self.step_result.emit(5, {"hierarchy_res": v_res["hierarchy_res"]})
             # [UI 对齐] 完成第 5 步后，立即将 UI 文字推进至第 6 步区位 (70%)
             self.progress.emit(70, "正在启动功能过程内容匹配...")
-
-            # 10. 功能过程校验 (Node 6)
+            # 10. 功能过程校验 (Node 6) - 需要Word文件
             step6_start = time.time()
             run_simple = raw_info.get("run_simple", False)
             simple_sheet = raw_info.get("simple_sheet")
-            if run_simple:
+            if run_simple and has_word:
                 RuntimeLogger.log(
                     f"正在进行功能过程匹配校验 (Sheet: {simple_sheet})..."
                 )
@@ -661,21 +639,21 @@ class ValidationWorker(QThread):
                     self.progress.emit(mapped_progress, f"过程匹配: {msg}")
                     # 扩展日志白名单，确保功能点匹配的各个阶段进度也能记录到日志文件
                     if msg and (
-                        "开始" in msg
-                        or "完成" in msg
-                        or "1/" in msg
-                        or "/100" in msg
-                        or "[PROCESS]" in msg
-                        or "阶段" in msg
-                        or "搜索" in msg
-                        or "进度" in msg
+                            "开始" in msg
+                            or "完成" in msg
+                            or "1/" in msg
+                            or "/100" in msg
+                            or "[PROCESS]" in msg
+                            or "阶段" in msg
+                            or "搜索" in msg
+                            or "进度" in msg
                     ):
                         RuntimeLogger.log(f"[Step 6] {msg}")
 
                 process_res = DocumentProcessor.validate_functional_process(
                     target_doc,
                     pair["excel"],
-                    header_row=f_header_row,
+                    header_row=f_header_row - 1,
                     func_col=f_col,
                     sheet_name=simple_sheet,
                     fuzzy_match=fuzzy,
@@ -691,18 +669,16 @@ class ValidationWorker(QThread):
                 v_res["process_res"] = process_res
             else:
                 v_res["process_res"] = {"is_valid": True, "skipped": True}
-
             if not self._is_running:
                 return
             v_res["process_res"]["duration"] = time.time() - step6_start
             self.step_result.emit(6, {"process_res": v_res["process_res"]})
             # [UI 对齐] 完成第 6 步后，立即将 UI 文字推进至第 7 步 (95%)
             self.progress.emit(95, "正在启动数据移动类型校验...")
-
-            # 11. 功能过程数据移动类型校验 (Node 7)
+            # 11. 功能过程数据移动类型校验 (Node 7) - 需要Word文件
             step7_start = time.time()
             run_move = raw_info.get("run_move", True)
-            if run_move:
+            if run_move and has_word:
                 RuntimeLogger.log(f"正在进行 [Step 7] 数据移动类型合规性校验...")
                 # 传入已加载的 WB 路径路径（此时已缓存）
                 f_header_row = raw_info.get("functional_header_row", 0)
@@ -710,7 +686,7 @@ class ValidationWorker(QThread):
                 move_res = DocumentProcessor.validate_data_movement_types(
                     pair["excel"],  # 使用路径是因为该方法内部做了路径缓存优化
                     sheet_name=simple_sheet,
-                    header_row=f_header_row,
+                    header_row=f_header_row - 1,
                     func_col=f_col,
                     move_col=f_col + 2,
                     project_name=self.task_data["filename"],
@@ -718,30 +694,148 @@ class ValidationWorker(QThread):
                 v_res["move_res"] = move_res
             else:
                 v_res["move_res"] = {"is_valid": True, "skipped": True}
-
             if not self._is_running:
                 return
             v_res["move_res"]["duration"] = time.time() - step7_start
             self.step_result.emit(7, {"move_res": v_res["move_res"]})
-            self.progress.emit(98, "正在进行最后的评估报告汇总...")
+            # 11.5 资产清单匹配校验 (Node 8)
+            step8_start = time.time()
+            run_asset = raw_info.get("run_asset", True)
+            asset_path = pair.get("asset") or raw_info.get("asset_excel")
+            if run_asset and asset_path and os.path.exists(asset_path):
+                RuntimeLogger.log(f"正在进行 [Step 8] 资产清单匹配校验...")
+                self.progress.emit(96, "正在启动资产清单匹配...")
 
+                def asset_progress_proxy(p, msg):
+                    if not self._is_running:
+                        return
+                    # 映射 96-98 的区间
+                    mapped_progress = 96 + int(p * 2)
+                    self.progress.emit(min(mapped_progress, 98), f"资产匹配: {msg}")
+
+                # 提取用户配置的拆分表参数
+                split_sheet = raw_info.get("hierarchy_sheet")
+                split_header_row = raw_info.get("hierarchy_header_row")
+                split_col_idx = [
+                    raw_info.get("level1_column_index"),
+                    raw_info.get("level2_column_index"),
+                    raw_info.get("level3_column_index"),
+                ]
+                # 提取用户配置的资产清单参数
+                asset_sheet = raw_info.get("asset_sheet")
+                asset_header_row = raw_info.get("asset_header_row")
+                asset_col_idx = [
+                    raw_info.get("asset_level1_index"),
+                    raw_info.get("asset_level2_index"),
+                    raw_info.get("asset_level3_index"),
+                ]
+                RuntimeLogger.log(
+                    f"[Step 8] 使用配置 - 拆分表: sheet={split_sheet}, header_row={split_header_row}, cols={split_col_idx}"
+                )
+                RuntimeLogger.log(
+                    f"[Step 8] 使用配置 - 资产清单: sheet={asset_sheet}, header_row={asset_header_row}, cols={asset_col_idx}"
+                )
+                asset_res = compare_split_with_asset(
+                    split_path=pair["excel"],
+                    asset_path=asset_path,
+                    split_sheet=split_sheet,
+                    asset_sheet=asset_sheet,
+                    split_header_row=split_header_row,
+                    asset_header_row=asset_header_row,
+                    split_col_idx=split_col_idx,
+                    asset_col_idx=asset_col_idx,
+                    threshold=threshold,
+                    progress_callback=asset_progress_proxy,
+                    should_cancel=lambda: not self._is_running,
+                    log_callback=lambda msg: RuntimeLogger.log(
+                        f"[Step 8] {msg}"
+                    )
+                    if msg
+                       and (
+                               "表头" in str(msg)
+                               or "匹配完成" in str(msg)
+                               or "统计" in str(msg)
+                               or "报告" in str(msg)
+                               or "异常" in str(msg)
+                       )
+                    else None,
+                )
+                if asset_res is None:
+                    return
+                v_res["asset_res"] = asset_res
+                RuntimeLogger.log(f"资产清单匹配完成: {asset_res.get('statistics', {})}")
+            else:
+                if not run_asset:
+                    reason = "未勾选资产清单匹配节点"
+                elif not asset_path:
+                    reason = (
+                        "未检测到资产清单文件（请上传文件名包含资产清单的 Excel 文件)"
+                    )
+                else:
+                    reason = "资产清单文件不存在"
+                v_res["asset_res"] = {"is_valid": True, "skipped": True, "reason": reason}
+            if not self._is_running:
+                return
+            v_res["asset_res"]["duration"] = time.time() - step8_start
+            self.step_result.emit(8, {"asset_res": v_res["asset_res"]})
+            # 11.6 数据属性重复检测 (Node 9)
+            step9_start = time.time()
+            run_data_attr_check = raw_info.get("run_data_attribute_check", True)
+            if run_data_attr_check and pair["excel"] and os.path.exists(pair["excel"]):
+                RuntimeLogger.log(f"正在进行 [Step 9] 数据属性重复检测...")
+                self.progress.emit(98, "正在检测数据属性重复...")
+                # 提取关键词模式（从配置或默认值）
+                keywords = raw_info.get("data_attr_keywords", ["ERX", "EW", "EX"])
+                # 获取拆分表的工作表名称（与资产清单匹配使用同一个sheet）
+                split_sheet = raw_info.get("hierarchy_sheet")
+
+                def data_attr_progress_proxy(current, total, msg):
+                    if not self._is_running:
+                        return
+                    # 映射 98-99 的区间
+                    if total > 0:
+                        p = current / total * 100
+                    else:
+                        p = 0
+                    mapped_progress = 98 + int(p * 0.01)
+                    self.progress.emit(min(mapped_progress, 99), f"数据属性检测: {msg}")
+
+                data_attr_res = check_data_attribute_duplicates(
+                    file_path=pair["excel"],
+                    sheet_name=split_sheet,  # 使用拆分表的工作表名称
+                    keywords=keywords,
+                    progress_callback=data_attr_progress_proxy
+                )
+                if data_attr_res is None:
+                    return
+                v_res["data_attr_res"] = data_attr_res
+                RuntimeLogger.log(f"数据属性重复检测完成: {data_attr_res.get('statistics', {})}")
+            else:
+                if not run_data_attr_check:
+                    reason = "未勾选数据属性重复检测节点"
+                elif not pair["excel"]:
+                    reason = "未检测到Excel文件"
+                else:
+                    reason = "Excel文件不存在"
+                v_res["data_attr_res"] = {"success": True, "skipped": True, "reason": reason}
+            if not self._is_running:
+                return
+            v_res["data_attr_res"]["duration"] = time.time() - step9_start
+            self.step_result.emit(9, {"data_attr_res": v_res["data_attr_res"]})
+            self.progress.emit(99, "正在进行最后的评估报告汇总...")
             # 12. 自动生成报表
             RuntimeLogger.log(f"正在汇总结果并生成评估报告...")
             report_path = ReportGenerator.generate_validation_report(
                 self.task_data["filename"], v_res
             )
             v_res["auto_report_path"] = report_path
-
             # 13. 保存运行日志
             log_path = RuntimeLogger.save_to_file(self.task_data["filename"])
             v_res["runtime_log_path"] = log_path
-
             self.progress.emit(100, "所有校验任务已完成")
             self.finished.emit(v_res)
-
         except Exception as e:
             import traceback
-
             RuntimeLogger.log(f"❌ 校验任务中断: {str(e)}", level="ERROR")
             RuntimeLogger.log(traceback.format_exc(), level="DEBUG")
             self.finished.emit({"is_valid": False, "error": str(e)})
@@ -749,6 +843,9 @@ class ValidationWorker(QThread):
             # 无论成功失败，确保保存一次会话日志
             project_name = self.task_data.get("filename", "Unknown")
             RuntimeLogger.save_to_file(project_name)
+            # ================= 【新增】关闭文件句柄，释放系统资源 =================
+            RuntimeLogger.close_file()
+            # ======================================================================
             # 任务完成后清理缓存
             DocumentProcessor.clear_cache()
 
@@ -787,7 +884,7 @@ class TaskCard(QFrame):
 
         if is_dark:
             # 深色模式精选色板
-            card_bg = "transparent"
+            card_bg = "#111827"
             card_border = "#334155"
             text_color = "#94a3b8"
             title_color = "#f8fafc"
@@ -1042,6 +1139,11 @@ class TaskCard(QFrame):
         # 4. 详情卡片
         self.detail_card = QFrame()
         self.detail_card.setObjectName("DetailCard")
+        # 设置尺寸策略使详情卡片能够自适应宽度
+        from PySide6.QtWidgets import QSizePolicy
+        self.detail_card.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
         detail_layout = QVBoxLayout(self.detail_card)
         detail_layout.setContentsMargins(20, 15, 20, 15)
         detail_layout.setSpacing(10)
@@ -1093,9 +1195,25 @@ class TaskCard(QFrame):
 
         # 视图堆栈
         self.detail_stack = QStackedWidget()
+        # 设置尺寸策略使堆栈能够自适应扩展
+        from PySide6.QtWidgets import QSizePolicy
+        self.detail_stack.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
 
         self.detail_content = QTextBrowser()  # 改用 QTextBrowser 以支持更好的 HTML 渲染
         self.detail_content.setOpenExternalLinks(True)
+        # 启用自动换行，防止长文本导致横向滚动
+        from PySide6.QtGui import QTextOption
+        self.detail_content.setWordWrapMode(QTextOption.WordWrap)
+        # 设置尺寸策略以适应屏幕宽度变化
+        from PySide6.QtWidgets import QSizePolicy
+        self.detail_content.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        # 设置最小和最大高度，确保内容区域合理显示
+        self.detail_content.setMinimumHeight(200)
+        self.detail_content.setMaximumHeight(600)
         # 细节样式统一移至 update_style
 
         # 表格预览：暂时下线
@@ -1287,7 +1405,7 @@ class TaskCard(QFrame):
         self.target_backend_progress = float(value)
 
         # 2. 定位当前所处的语义阶段 (同步 ValidationWorker.run 中的 emit 进度点与 UI 气泡)
-        # 步骤列表索引：0:环境, 1:模板, 2:空值, 3:比例, 4:因子, 5:层级, 6:过程, 7:报告
+        # 步骤列表索引：0:环境, 1:模板, 2:空值, 3:比例, 4:因子, 5:层级, 6:过程, 7:移动, 8:资产, 9:数据属性重复检测
         step_names = [
             "环境解析与预加载",
             "模板合规性校验",
@@ -1296,10 +1414,12 @@ class TaskCard(QFrame):
             "附加值因子提取",
             "核心层级关系校验",
             "简单过程内容匹配",
-            "数据移动校验与报告汇总",
+            "数据移动类型校验",
+            "资产清单匹配",
+            "数据属性重复检测",
         ]
 
-        # 匹配 ValidationWorker.run 中的 emit 点：[0, 15, 30, 33, 36, 39, 70, 95]
+        # 匹配 ValidationWorker.run 中的 emit 点：[0, 15, 30, 33, 36, 39, 70, 95, 96, 98, 99]
         if value < 15:
             current_idx = 0
             self.current_step_num = 0
@@ -1321,9 +1441,18 @@ class TaskCard(QFrame):
         elif value < 95:
             current_idx = 6
             self.current_step_num = 6
-        else:
+        elif value < 96:
             current_idx = 7
             self.current_step_num = 7
+        elif value < 98:
+            current_idx = 8
+            self.current_step_num = 8
+        elif value < 99:
+            current_idx = 9
+            self.current_step_num = 9
+        else:
+            current_idx = 9
+            self.current_step_num = 9
 
         # 3. 更新界面状态文字
         if hasattr(self, "status_label"):
@@ -1370,6 +1499,7 @@ class TaskCard(QFrame):
             if not (
                 current_log.startswith("✅")
                 or current_log.startswith("❌")
+                or current_log.startswith("⚪")
                 or "⚠️" in current_log
             ):
                 if sub_step_text:
@@ -1386,7 +1516,7 @@ class TaskCard(QFrame):
         if self.current_step_num > old_step:
             for s in range(0, self.current_step_num):
                 curr_status = self.steps_widget.step_nodes[s].status
-                if curr_status not in ["done", "fail", "warn", "finished"]:
+                if curr_status not in ["done", "fail", "warn", "finished", "skipped"]:
                     self.steps_widget.set_step_status(s, "finished")
             self.steps_widget.set_step_progress(self.current_step_num, 5)
 
@@ -1839,6 +1969,117 @@ class TaskCard(QFrame):
                 self.task_data["logs"][7] = log
                 self.update_log(7, log)
 
+        elif step_num == 8:
+            asset_res = results.get("asset_res", {})
+            if asset_res:
+                if asset_res.get("skipped"):
+                    status = "skipped"
+                    reason = asset_res.get("reason", "")
+                    log = f"⚪ 资产清单匹配已跳过。{('原因: ' + reason) if reason else ''}"
+                elif not asset_res.get("is_valid"):
+                    status = "fail"
+                    log = f"❌资产清单匹配执行出错：{asset_res.get('error', '未知错误')}"
+                else:
+                    stats = asset_res.get("statistics", {})
+                    total_cnt = stats.get("总数", 0)
+                    exact_cnt = stats.get("完全匹配", 0)
+                    fuzzy_cnt = stats.get("模糊匹配", 0)
+                    mismatch_cnt = stats.get("不匹配", 0)
+                    match_rate_str = stats.get("匹配率", "0%")
+
+                    if total_cnt == 0:
+                        status = "fail"
+                        log = "❌ 资产清单匹配未执行：拆分表中未找到有效的层级数据。"
+                    elif mismatch_cnt == 0:
+                        status = "done"
+                        log = (
+                            f"✅资产清单匹配通过（匹配率{match_rate_str}）：共 {total_cnt} 项，"
+                            f"完全匹配 {exact_cnt}、模糊匹配 {fuzzy_cnt}，全部在资产清单中找到对应。"
+                        )
+                    else:
+                        status = "fail"
+
+                        # 按类型分组展示问题项（最多展示 5 项）
+                        items = asset_res.get("items", [])
+                        missing_lines = []
+                        mismatch_lines = []
+                        for item in items:
+                            if item.get("匹配状态") != "不匹配":
+                                continue
+                            desc = item.get("缺失简略描述", "")
+                            if desc and desc != "无缺失":
+                                missing_lines.append(desc)
+                            desc2 = item.get("层级不匹配简略描述", "")
+                            if desc2 and desc2 != "无层级错位":
+                                mismatch_lines.append(desc2)
+
+                        issue_details = []
+                        if missing_lines:
+                            issue_details.append(
+                                "• [缺失项] (拆分表模块在资产清单无对应):\n  - "
+                                + "\n  - ".join(missing_lines[:5])
+                            )
+                        if mismatch_lines:
+                            issue_details.append(
+                                "• [层级不匹配] (拆分表与资产清单层级不一致):\n  - "
+                                + "\n  - ".join(mismatch_lines[:5])
+                            )
+
+                        remaining = mismatch_cnt - (len(missing_lines) + len(mismatch_lines))
+                        log = (
+                            f"❌资产清单匹配存在异常（匹配率{match_rate_str}，共{mismatch_cnt}处问题）：\n"
+                            + "\n".join(issue_details)
+                        )
+                        if remaining > 0:
+                            log += f"\n  ...等共 {mismatch_cnt} 处问题"
+                        log += "\n\n📂 [提示]：点击上方圆圈图标可直接打开详细的资产清单匹配 Excel 报告。"
+
+                # 加入耗时记录
+                dur = asset_res.get("duration", 0)
+                log += f" (耗时: {dur:.1f}s)"
+
+                self.steps_widget.set_step_status(8, status)
+                self.task_data["logs"][8] = log
+                self.update_log(8, log)
+
+        elif step_num == 9:
+            # Step 9: 数据属性重复检测
+            data_attr_res = results.get("data_attr_res", {})
+            if data_attr_res:
+                if data_attr_res.get("skipped"):
+                    status = "skipped"
+                    reason = data_attr_res.get("reason", "")
+                    log = f"⚪ 数据属性重复检测已跳过。{('原因: ' + reason) if reason else ''}"
+                elif not data_attr_res.get("success"):
+                    status = "fail"
+                    log = f"❌数据属性重复检测执行出错：{data_attr_res.get('error', '未知错误')}"
+                else:
+                    stats = data_attr_res.get("statistics", {})
+                    total_marked = stats.get("total_marked_rows", 0)
+                    intra_dups = stats.get("intra_duplicates", 0)
+                    cross_dups = stats.get("cross_duplicates", 0)
+                    patterns_matched = stats.get("patterns_matched", 0)
+                    
+                    if total_marked == 0:
+                        status = "done"
+                        log = f"✅数据属性重复检测通过：未发现任何重复项"
+                    else:
+                        status = "warn"
+                        log = (
+                            f"⚠️数据属性重复检测发现 {total_marked} 行存在重复：\n"
+                            f"  • 单功能过程内重复: {intra_dups} 组\n"
+                            f"  • 跨功能过程重复: {cross_dups} 组（匹配 {patterns_matched} 个模式）\n"
+                            f"📂 [提示]：点击上方圆圈图标可打开详细的重复检测报告 Excel"
+                        )
+                
+                # 加入耗时记录
+                dur = data_attr_res.get("duration", 0)
+                log += f" (耗时: {dur:.1f}s)"
+                
+                self.steps_widget.set_step_status(9, status)
+                self.task_data["logs"][9] = log
+                self.update_log(9, log)
+
         # 实时刷新整体异常状态指示 (解决用户提到的“图中圈起来的地方变红”)
         has_any_fail = False
         for node in getattr(self.steps_widget, "step_nodes", []):
@@ -1876,7 +2117,9 @@ class TaskCard(QFrame):
             self.steps_widget.clear_all_progress()
 
             # 确保所有之前的步骤如果是 pending/processing，都标记为已完成
-            for i in range(1, 8):
+            for i in range(1, 10):  # 更新为10个步骤
+                if i > len(self.steps_widget.step_nodes):
+                    break
                 node = self.steps_widget.step_nodes[i - 1]
                 if node.status in ["pending", "processing"]:
                     self.steps_widget.set_step_status(i, "finished")
@@ -1932,21 +2175,19 @@ class TaskCard(QFrame):
             final_show_step = 5
         elif res_dict.get("process_res", {}).get("statistics", {}).get("缺失项", 0) > 0:
             final_show_step = 6
+        elif res_dict.get("asset_res", {}).get("statistics", {}).get("不匹配", 0) > 0:
+            final_show_step = 8
+        elif res_dict.get("data_attr_res", {}).get("statistics", {}).get("total_marked_rows", 0) > 0:
+            final_show_step = 9
 
         # 触发最终详情页更新
-        for i in range(1, 8):
+        for i in range(1, 10):  # 更新为10个步骤
             if i not in self.task_data["logs"]:
                 self.task_data["logs"][i] = "✅ 校验通过，未发现异常。"
 
         final_log = self.task_data["logs"].get(final_show_step, "")
         self.update_log(final_show_step, final_log)
 
-        # 自动化：完成后自动打开文件夹
-        config = MatcherConfig.load()
-        if config.get("automation", {}).get("auto_open", True):
-            report_path = res_dict.get("auto_report_path")
-            if report_path:
-                open_directory(os.path.dirname(report_path))
         if res_dict.get("excel_check", {}).get("is_ok") == False:
             final_show_step = 2
         elif res_dict.get("ratio_check", {}).get("is_ok") == False:
@@ -1966,26 +2207,30 @@ class TaskCard(QFrame):
             final_show_step = 5
         elif res_dict.get("process_res", {}).get("statistics", {}).get("缺失项", 0) > 0:
             final_show_step = 6
+        elif res_dict.get("asset_res", {}).get("statistics", {}).get("不匹配", 0) > 0:
+            final_show_step = 8
+        elif res_dict.get("data_attr_res", {}).get("statistics", {}).get("total_marked_rows", 0) > 0:
+            final_show_step = 9
 
         # 兜底：如果选中的步骤没有任何日志（可能被跳过），则按倒序找第一个有日志的
         if final_show_step not in self.task_data["logs"]:
-            for i in range(7, 0, -1):
+            for i in range(9, 0, -1):  # 更新为9
                 if i in self.task_data["logs"]:
                     final_show_step = i
                     break
 
         final_log = self.task_data["logs"].get(final_show_step, "")
         if res_dict.get("auto_report_path"):
-            final_log += f"\n\n📂 完整评估报告已自动保存至：{os.path.dirname(res_dict.get('auto_report_path'))}"
+            final_log += f"\n\n📂 完整评估报告已自动保存至：{res_dict.get('auto_report_path')}"
 
         self.update_log(final_show_step, final_log)
 
-        # 自动化：完成后自动打开文件夹
+        # 自动化：完成后自动打开文件
         config = MatcherConfig.load()
         if config.get("automation", {}).get("auto_open", True):
             report_path = res_dict.get("auto_report_path")
             if report_path:
-                open_directory(os.path.dirname(report_path))
+                open_directory(report_path)
 
     def on_view_toggle(self, btn_id):
         """切换文字/表格视图 (已暂时注释)"""
@@ -2360,7 +2605,8 @@ class TaskCard(QFrame):
         # 4. 格式化正文 (优化 Light Mode 字体对比度)
         formatted_text = text.replace("\n", "<br/>")
         text_col = "#cbd5e1" if is_dark else "#334155"
-        style = f"color: {text_col}; background: transparent; font-family: 'Segoe UI', 'Microsoft YaHei UI'; font-size: 14px; line-height: 1.6;"
+        # 添加 word-wrap 和 overflow-wrap 样式确保长文本自动换行
+        style = f"color: {text_col}; background: transparent; font-family: 'Segoe UI', 'Microsoft YaHei UI'; font-size: 14px; line-height: 1.6; word-wrap: break-word; overflow-wrap: break-word;"
         self.detail_content.setHtml(f"<div style='{style}'>{formatted_text}</div>")
 
         # 5. 更新表格数据 (如果当前在表格视图)
@@ -2421,6 +2667,28 @@ class TaskCard(QFrame):
                     os.startfile(path)
                 except Exception as e:
                     self.update_log(7, f"❌ 无法打开报告文件: {e}")
+            else:
+                self.on_label_clicked(step_num)
+        elif step_num == 8:
+            # 尝试打开资产清单匹配报告
+            results = self.task_data.get("validation_results", [{}])[0]
+            path = results.get("asset_res", {}).get("report_path")
+            if path and os.path.exists(path):
+                try:
+                    os.startfile(path)
+                except Exception as e:
+                    self.update_log(8, f"❌ 无法打开报告文件: {e}")
+            else:
+                self.on_label_clicked(step_num)
+        elif step_num == 9:
+            # 尝试打开数据属性重复检测报告
+            results = self.task_data.get("validation_results", [{}])[0]
+            path = results.get("data_attr_res", {}).get("output_path")
+            if path and os.path.exists(path):
+                try:
+                    os.startfile(path)
+                except Exception as e:
+                    self.update_log(9, f"❌ 无法打开报告文件: {e}")
             else:
                 self.on_label_clicked(step_num)
         else:

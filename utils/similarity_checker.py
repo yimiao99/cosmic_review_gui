@@ -77,9 +77,14 @@ class SimilarityChecker:
                     tm_title = s.get("title", s.get("display", s.get("cleaned", "")))
 
                 if tm_title:
-                    template_content_map[clean_text(tm_title)] = (
-                        s.get("content", "") if isinstance(s, dict) else ""
-                    )
+                    t_content = s.get("content", "") if isinstance(s, dict) else ""
+                    t_key = clean_text(tm_title)
+                    # 同名章节可能因多来源大纲提取出现重复项，空内容不得覆盖已有正文
+                    if t_key and (
+                        t_key not in template_content_map
+                        or (t_content and not template_content_map[t_key])
+                    ):
+                        template_content_map[t_key] = t_content
 
         results = {
             "is_valid": True,

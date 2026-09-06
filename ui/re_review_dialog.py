@@ -111,7 +111,7 @@ class ReReviewUploadDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("新建重评任务")
         self.setMinimumSize(700, 600)
-        self.setWindowIcon(QIcon(get_resource_path("ui/logo.png")))
+        self.setWindowIcon(QIcon(get_resource_path("ui/logo.ico")))
         self.setAcceptDrops(True)  # 支持全局拖拽
 
         # 应用原生标题栏深色模式

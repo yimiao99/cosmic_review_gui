@@ -90,6 +90,11 @@ class ReportGenerator:
             # 净化项目名
             clean_name = cls._clean_project_name(task_name)
 
+            # 为该项目创建独立的子文件夹
+            project_subdir = os.path.join(output_dir, clean_name)
+            if not os.path.exists(project_subdir):
+                os.makedirs(project_subdir, exist_ok=True)
+
             # 转换为 DataFrame
             df = pd.DataFrame(details)
 
@@ -114,7 +119,7 @@ class ReportGenerator:
             # 确定文件名: xxx项目_时间_模板校验评估报告.xlsx
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             base_filename = f"{clean_name}_{timestamp}_模板校验评估报告.xlsx"
-            target_path = os.path.join(output_dir, base_filename)
+            target_path = os.path.join(project_subdir, base_filename)
 
             # 防占用处理：如果文件已存在且无法写入，尝试生成副本
             final_path = target_path
@@ -129,7 +134,7 @@ class ReportGenerator:
                 except (IOError, PermissionError):
                     # 文件被占用，尝试新名称
                     name, ext = os.path.splitext(base_filename)
-                    final_path = os.path.join(output_dir, f"{name}({counter}){ext}")
+                    final_path = os.path.join(project_subdir, f"{name}({counter}){ext}")
                     counter += 1
 
             # 备份之前的版本（如果文件已存在）

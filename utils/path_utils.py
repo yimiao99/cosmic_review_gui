@@ -131,3 +131,30 @@ def open_directory(path):
         subprocess.Popen(["open", path])
     else:  # Linux
         subprocess.Popen(["xdg-open", path])
+
+
+def get_project_report_dir(project_name: str = None) -> str:
+    """
+    获取当前项目的专属报告存放目录。
+    如果未传入 project_name，则自动从 RuntimeLogger 中获取当前任务的项目名。
+    目录结构: {initial_review_base_dir}/{safe_project_name}/
+    """
+    from extend.matcher_config import MatcherConfig
+    from utils.runtime_logger import RuntimeLogger
+
+    config = MatcherConfig.load()
+    base_dir = config.get("storage", {}).get("initial_review", "reports")
+
+    # 如果没有传入 project_name，尝试从 RuntimeLogger 获取当前项目
+    if not project_name:
+        project_name = getattr(RuntimeLogger, '_current_project', None)
+
+    if project_name:
+        # 清理项目名中的非法字符，防止创建文件夹失败
+        safe_name = "".join([c for c in project_name if c not in '<>:"/\\|?*']).strip()
+        if safe_name:
+            base_dir = os.path.join(base_dir, safe_name)
+
+    # 确保目录存在
+    os.makedirs(base_dir, exist_ok=True)
+    return base_dir
